@@ -41,9 +41,7 @@ from .card import Card
 from .state import GameState, BettingRound
 
 
-# --------------------------------------------------------------------------- #
-# Player snapshot                                                              #
-# --------------------------------------------------------------------------- #
+# PLAYER SNAPSHOT
 
 @dataclass(frozen=True)
 class PlayerSnapshot:
@@ -80,10 +78,7 @@ class PlayerSnapshot:
         return p
 
 
-# --------------------------------------------------------------------------- #
-# Game snapshot                                                                #
-# --------------------------------------------------------------------------- #
-
+# GAME SNAPSHOT
 @dataclass(frozen=True)
 class GameSnapshot:
     """
@@ -116,10 +111,7 @@ class GameSnapshot:
     raise_limit:           int
 
 
-# --------------------------------------------------------------------------- #
-# Public API                                                                   #
-# --------------------------------------------------------------------------- #
-
+# API
 def take_snapshot(game) -> GameSnapshot:
     """
     Capture the full mid-hand state of a PokerGame.

@@ -40,9 +40,6 @@ class PokerGame:
         self.dealer_index = 0       # moves each hand
         self.state: Optional[GameState] = None
 
-    # ------------------------------------------------------------------ #
-    # Hand lifecycle                                                       #
-    # ------------------------------------------------------------------ #
 
     def start_new_hand(self) -> GameState:
         """Reset everything and deal a new hand. Returns the initial state."""
@@ -156,9 +153,6 @@ class PokerGame:
 
         return actions
 
-    # ------------------------------------------------------------------ #
-    # Internal action execution                                            #
-    # ------------------------------------------------------------------ #
 
     def _execute_action(self, player: Player, action: Action):
         s = self.state
@@ -240,9 +234,6 @@ class PokerGame:
             return None  # would be all-in; skip (ALL_IN covers it)
         return Action(atype, actual_raise)
 
-    # ------------------------------------------------------------------ #
-    # Betting round progression                                            #
-    # ------------------------------------------------------------------ #
 
     def _is_betting_round_over(self) -> bool:
         """
@@ -310,9 +301,6 @@ class PokerGame:
         if not s.current_player.is_active:
             self._move_to_next_player()
 
-    # ------------------------------------------------------------------ #
-    # Showdown & pot awarding                                              #
-    # ------------------------------------------------------------------ #
 
     def _resolve_showdown(self):
         s = self.state
@@ -361,9 +349,6 @@ class PokerGame:
         s.winners = [winner.id]
         s.terminal = True
 
-    # ------------------------------------------------------------------ #
-    # Hand rotation helpers                                                #
-    # ------------------------------------------------------------------ #
 
     def _post_blind(self, player: Player, amount: float):
         amount = min(amount, player.stack)
@@ -434,10 +419,6 @@ class PokerGame:
     def rotate_dealer(self):
         """Call between hands to move the dealer button."""
         self.dealer_index = self._next_active_index(self.dealer_index, skip=1)
-
-    # ------------------------------------------------------------------ #
-    # Pretty printing                                                      #
-    # ------------------------------------------------------------------ #
 
     def print_state(self):
         s = self.state

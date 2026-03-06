@@ -20,11 +20,7 @@ from .action import Action, ActionType
 from .state import GameState, BettingRound
 from .evaluator import evaluate_hand
 
-
-# --------------------------------------------------------------------------- #
-# Abstract base                                                                #
-# --------------------------------------------------------------------------- #
-
+# Abstract base
 class Bot(ABC):
     """
     All bots implement this interface. The engine calls choose_action() on
@@ -49,10 +45,7 @@ class Bot(ABC):
         """
         ...
 
-    # ------------------------------------------------------------------ #
-    # Shared helpers available to all subclasses                          #
-    # ------------------------------------------------------------------ #
-
+    # Helpers
     def _my_player(self, state: GameState):
         return state.players[self.player_id]
 
@@ -71,10 +64,6 @@ class Bot(ABC):
         return f"{self.name}(id={self.player_id})"
 
 
-# --------------------------------------------------------------------------- #
-# RandomBot                                                                    #
-# --------------------------------------------------------------------------- #
-
 class RandomBot(Bot):
     """Picks a random legal action every turn. Good for stress-testing."""
 
@@ -86,10 +75,6 @@ class RandomBot(Bot):
         return self._rng.choice(legal_actions)
 
 
-# --------------------------------------------------------------------------- #
-# CallBot                                                                      #
-# --------------------------------------------------------------------------- #
-
 class CallBot(Bot):
     """Always calls or checks — never raises, rarely folds. Calling station."""
 
@@ -100,9 +85,7 @@ class CallBot(Bot):
         return self._get_action(legal_actions, ActionType.CHECK, ActionType.CALL)
 
 
-# --------------------------------------------------------------------------- #
-# Hand-strength helpers (used by smarter bots)                                #
-# --------------------------------------------------------------------------- #
+# Hand-strength helpers (used by smarter bots)
 
 # Preflop hand strength buckets based on hole cards.
 # Returns a score 0.0–1.0 (higher = stronger).
@@ -133,10 +116,6 @@ def _postflop_strength(hole_cards, board) -> float:
     score = evaluate_hand(hole_cards, board)
     return score[0] / 8.0
 
-
-# --------------------------------------------------------------------------- #
-# TightBot                                                                     #
-# --------------------------------------------------------------------------- #
 
 class TightBot(Bot):
     """
@@ -225,10 +204,6 @@ class TightBot(Bot):
             return self._get_action(legal_actions, ActionType.CHECK)
         return self._get_action(legal_actions, ActionType.FOLD)
 
-
-# --------------------------------------------------------------------------- #
-# PositionBot                                                                  #
-# --------------------------------------------------------------------------- #
 
 class PositionBot(TightBot):
     """

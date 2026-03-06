@@ -65,10 +65,7 @@ def _header(text: str):
     print(f"\n{BOLD}{CYAN}{text}{RESET}")
 
 
-# --------------------------------------------------------------------------- #
-# State display                                                                #
-# --------------------------------------------------------------------------- #
-
+# STATE DISPLAY
 def display_state(state: GameState, human_seat: int, show_all_hands: bool = False):
     """Render the full table to the terminal."""
     _clear()
@@ -144,10 +141,7 @@ def display_hand_result(state: GameState, human_seat: int):
         print()
 
 
-# --------------------------------------------------------------------------- #
-# Action input                                                                 #
-# --------------------------------------------------------------------------- #
-
+# ACTION INPUTS
 _ACTION_LABELS = {
     ActionType.FOLD:           ("F", "Fold"),
     ActionType.CHECK:          ("K", "Check"),
@@ -197,10 +191,7 @@ def prompt_action(state: GameState, legal_actions: List[Action]) -> Action:
             return legal_actions[0]
 
 
-# --------------------------------------------------------------------------- #
-# Session summary                                                              #
-# --------------------------------------------------------------------------- #
-
+# Session Summary
 def display_session_summary(session: GameSession, human_seat: int):
     _clear()
     _hr("═")
@@ -225,10 +216,7 @@ def display_session_summary(session: GameSession, human_seat: int):
         print(f"  {RED}Better luck next time. {winner_name} wins the session.{RESET}\n")
 
 
-# --------------------------------------------------------------------------- #
-# Setup wizard                                                                 #
-# --------------------------------------------------------------------------- #
-
+# SETUP
 BOT_TYPES = {
     "1": ("TightBot",    lambda seat: TightBot(seat)),
     "2": ("PositionBot", lambda seat: PositionBot(seat)),
@@ -280,10 +268,6 @@ def _setup_wizard():
 
     return stack, human_seat, bot_factory, bot_name, max_hands
 
-
-# --------------------------------------------------------------------------- #
-# Main entry point                                                             #
-# --------------------------------------------------------------------------- #
 
 def run_cli():
     stack, human_seat, bot_factory, bot_name, max_hands = _setup_wizard()

@@ -47,9 +47,7 @@ from .action import Action, ActionType
 from .card import Card
 
 
-# --------------------------------------------------------------------------- #
-# Constants                                                                    #
-# --------------------------------------------------------------------------- #
+# constants
 
 NUM_PLAYERS   = 6
 NUM_RANKS     = 13    # 2–A
@@ -109,9 +107,7 @@ _STREET_INDEX = {
 _ACTION_INDEX = {a: a.value for a in ActionType}
 
 
-# --------------------------------------------------------------------------- #
-# Card encoding                                                                #
-# --------------------------------------------------------------------------- #
+# CARD ENCODING
 
 def _card_index(card: Card) -> int:
     """Map a Card to an index 0–51. rank 2=0 … A=12, suit 0–3."""
@@ -130,9 +126,7 @@ def _encode_cards(cards: List[Card], vec: np.ndarray, offset: int, max_cards: in
         vec[slot + _card_index(card)] = 1.0
 
 
-# --------------------------------------------------------------------------- #
-# Public API                                                                   #
-# --------------------------------------------------------------------------- #
+# API
 
 def encode_observation(state: GameState,
                         player_id: int,

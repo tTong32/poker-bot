@@ -27,10 +27,6 @@ class GameState:
     terminal: bool = False
     winners: List[int] = field(default_factory=list)  # player ids
 
-    # ------------------------------------------------------------------ #
-    # Convenience views                                                    #
-    # ------------------------------------------------------------------ #
-
     @property
     def current_player(self) -> Player:
         return self.players[self.current_player_index]
