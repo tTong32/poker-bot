@@ -141,7 +141,7 @@ class GameSession:
         self.hand_results.append(result)
         self.game.rotate_dealer()
         return result
-        
+
     def _play_one_hand(self) -> HandResult:
         self.hand_number += 1
         state = self.game.start_new_hand()
