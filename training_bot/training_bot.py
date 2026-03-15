@@ -26,7 +26,7 @@ from poker_engine.action import Action, ActionType
 from poker_engine.bots import Bot
 from poker_engine.observation import encode_observation
 from poker_engine.state import GameState
-import torch
+import torch    
 
 @dataclass
 class Experience:
