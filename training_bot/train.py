@@ -2,249 +2,620 @@
 train.py — Training environment for the poker RL bot.
 
 Run with:
-    python -m poker_engine.train
+    python -m training_bot.train
+    python -m training_bot.train --name my_experiment
 
-Curriculum stages:
-    1 — RandomBot opponents              (graduate at +5.0 avg chip delta/hand)
-    2 — CallBot/TightBot/PositionBot     (graduate at +2.0 avg chip delta/hand)
-    3 — Self-play pool                   (runs indefinitely)
+Named runs isolate all artifacts under checkpoints/<name>/, so multiple
+experiments never overwrite each other.  On startup you are prompted to
+resume an existing run or start a new one.
 
-Chip delta is averaged across all 3 training bots and normalised by big blind.
-Graduation requires DELTA_HISTORY_SIZE hands of data before checking.
+Directory layout per run
+------------------------
+    checkpoints/<run_name>/
+        latest.pt            ← always points to the most recent update
+        update_<N>.pt        ← periodic snapshots
+        stage2_start.pt
+        stage3_start.pt
+    snapshots/<run_name>/
+        snapshot_<N>.pt      ← self-play pool entries
+    logs/<run_name>/
+        training_log.csv     ← one row per PPO update
+        hands_log.csv        ← one row per hand
+        eval_log.csv         ← one row per ladder evaluation
+    tensorboard/<run_name>/
+        events.out.*         ← live TensorBoard stream
+
+Curriculum stages
+-----------------
+    1 — RandomBot opponents          graduate at avg_delta > +5.0 BB/hand
+    2 — Mixed (Call/Tight/Position)  graduate at avg_delta > +2.0 BB/hand
+    3 — Self-play pool               runs indefinitely
 """
 
 import os
+import csv
 import time
 import random
 import torch
-from collections import deque
+import numpy as np
+from collections import deque, Counter
+from typing import Dict, List, Optional
 
 from poker_engine.game import NUM_PLAYERS
 from poker_engine.session import GameSession
 from poker_engine.bots import TightBot, PositionBot, RandomBot, CallBot
+from poker_engine.action import ActionType
 from .network import PokerNetwork
 from .ppo import PPOTrainer
-from .training_bot import TrainingBot
+from .training_bot import TrainingBot, Experience
+from .self_play_pool import SelfPlayPool, SNAPSHOT_INTERVAL
+from .rl_bot import RLBot
 
 # Config
+STARTING_STACK       = 1000.0
+BIG_BLIND            = STARTING_STACK / 100   # 10.0
+ROLLOUT_HANDS        = 200        # hands collected before each PPO update
+DELTA_HISTORY_SIZE   = 10_000    # rolling window for avg chip delta
+CHECKPOINT_INTERVAL  = 50        # PPO updates between checkpoints
+LADDER_EVAL_INTERVAL = 100       # PPO updates between ladder evaluations
+LADDER_EVAL_HANDS    = 1_000     # hands per opponent in the mini eval
 
-STARTING_STACK      = 1000.0
-BIG_BLIND           = STARTING_STACK / 100   # 10.0
-ROLLOUT_HANDS       = 200        # hands before each PPO update
-DELTA_HISTORY_SIZE  = 10000      # hands tracked for chip delta average
-CHECKPOINT_INTERVAL = 50         # PPO updates between checkpoints
-CHECKPOINT_DIR      = "checkpoints"
+STAGE_1_THRESHOLD    = 5.0       # BB/hand avg to leave stage 1
+STAGE_2_THRESHOLD    = 2.0       # BB/hand avg to leave stage 2
 
-# Curriculum thresholds (avg chip delta per hand, in big blinds)
-STAGE_1_THRESHOLD   = 5.0        # +5 BB/hand avg to leave RandomBot
-STAGE_2_THRESHOLD   = 2.0        # +2 BB/hand avg to leave mixed bots
+TRAINING_SEATS       = [0, 1, 2]
 
-# Seats assigned to TrainingBot (rest are opponents)
-TRAINING_SEATS      = [0, 1, 2]
+# Red-flag thresholds (warnings printed to console)
+RF_FOLD_RATE     = 0.60
+RF_ALLIN_RATE    = 0.30
+RF_PASSIVE_RATE  = 0.80
+RF_EXP_VAR       = 0.30   # explained variance below this is concerning
+
+# Terminal colours
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+CYAN   = "\033[96m"
+YELLOW = "\033[93m"
+GREEN  = "\033[92m"
+RED    = "\033[91m"
 
 
-# Logging
+# Logging helpers
+
+def _ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
 
 def _log(msg: str):
-    ts = time.strftime("%H:%M:%S")
-    print(f"  [{ts}]  {msg}", flush=True)
+    print(f"  [{time.strftime('%H:%M:%S')}]  {msg}", flush=True)
 
 
-def _log_stats(update_num: int, stage: int, avg_delta: float, stats: dict):
+def _ensure(path: str):
+    os.makedirs(path, exist_ok=True)
+
+
+def _init_csv(path: str, headers: List[str]):
+    """Write headers only if the file does not already exist (append-safe)."""
+    if not os.path.exists(path):
+        with open(path, "w", newline="") as f:
+            csv.writer(f).writerow(headers)
+
+
+def _write_csv(path: str, row: list):
+    with open(path, "a", newline="") as f:
+        csv.writer(f).writerow(row)
+
+
+def _action_pcts(dist: Counter) -> List[str]:
+    """Return per-ActionType percentage strings in enum order."""
+    total = sum(dist.values()) or 1
+    return [f"{dist.get(atype, 0) / total * 100:.2f}" for atype in ActionType]
+
+
+def _log_update(update_num, stage, avg, stats, dist):
+    ev       = stats.get("explained_variance", 0.0)
+    ev_warn  = f"  {RED}⚠ LOW EV{RESET}" if ev < RF_EXP_VAR else ""
+    total    = sum(dist.values()) or 1
+
     print(
-        f"  update={update_num:>5}  "
-        f"stage={stage}  "
-        f"avg_delta={avg_delta:>+7.3f} BB/hand  "
+        f"  update={update_num:>5}  stage={stage}  "
+        f"avg_delta={avg:>+7.3f} BB/hand  "
         f"policy_loss={stats['policy_loss']:>7.4f}  "
         f"value_loss={stats['value_loss']:>7.4f}  "
-        f"entropy={stats['entropy']:>6.4f}",
+        f"entropy={stats['entropy']:>6.4f}  "
+        f"ev={ev:>5.3f}{ev_warn}",
         flush=True,
     )
+
+    # Compact action distribution
+    dist_str = "  ".join(
+        f"{atype.name[:4]}={dist.get(atype, 0) / total * 100:.0f}%"
+        for atype in ActionType
+    )
+    print(f"           {dist_str}", flush=True)
+
+    # Red-flag console warnings
+    fold_r    = dist.get(ActionType.FOLD,  0) / total
+    allin_r   = dist.get(ActionType.ALL_IN, 0) / total
+    passive_r = (dist.get(ActionType.CHECK, 0) + dist.get(ActionType.CALL, 0)) / total
+
+    if fold_r    > RF_FOLD_RATE:
+        print(f"  {RED}⚠ FOLD RATE {fold_r:.1%} > {RF_FOLD_RATE:.0%}{RESET}")
+    if allin_r   > RF_ALLIN_RATE:
+        print(f"  {RED}⚠ ALL-IN RATE {allin_r:.1%} > {RF_ALLIN_RATE:.0%}{RESET}")
+    if passive_r > RF_PASSIVE_RATE:
+        print(f"  {RED}⚠ PASSIVE RATE {passive_r:.1%} > {RF_PASSIVE_RATE:.0%}{RESET}")
 
 
 # Checkpointing
 
-def save_checkpoint(network, optimizer, update_num, stage, delta_history, path):
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+def _save(network, optimizer, update_num, stage, delta_history, path):
+    _ensure(os.path.dirname(path))
+    avg = sum(delta_history) / len(delta_history) if delta_history else 0.0
     torch.save({
-        'network_state':    network.state_dict(),
-        'optimizer_state':  optimizer.state_dict(),
-        'update_num':       update_num,
-        'stage':            stage,
-        'delta_history':    list(delta_history),
+        "network_state":   network.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "update_num":      update_num,
+        "stage":           stage,
+        "delta_history":   list(delta_history),
+        "avg_delta":       avg,
     }, path)
-    _log(f"Checkpoint saved -> {path}")
+    _log(f"Checkpoint saved → {path}")
 
 
-def load_checkpoint(network, optimizer, path):
-    if not os.path.exists(path):
-        return 0, 1, deque(maxlen=DELTA_HISTORY_SIZE)
-    checkpoint = torch.load(path)
-    network.load_state_dict(checkpoint['network_state'])
-    optimizer.load_state_dict(checkpoint['optimizer_state'])
-    delta_history = deque(checkpoint['delta_history'], maxlen=DELTA_HISTORY_SIZE)
+def _load(network, optimizer, path):
+    ck = torch.load(path, weights_only=False)
+    network.load_state_dict(ck["network_state"])
+    optimizer.load_state_dict(ck["optimizer_state"])
+    history = deque(ck.get("delta_history", []), maxlen=DELTA_HISTORY_SIZE)
     _log(
-        f"Checkpoint loaded <- {path}  "
-        f"(update={checkpoint['update_num']}, stage={checkpoint['stage']})"
+        f"Checkpoint loaded ← {path}  "
+        f"(update={ck['update_num']}, stage={ck['stage']}, "
+        f"avg_delta={ck.get('avg_delta', 0.0):+.3f})"
     )
-    return checkpoint['update_num'], checkpoint['stage'], delta_history
+    return ck["update_num"], ck["stage"], history
 
 
-# Session Setup
+def _read_meta(path: str) -> dict:
+    """Read checkpoint metadata without allocating model weights."""
+    try:
+        ck = torch.load(path, weights_only=False)
+        return {k: ck.get(k, "?") for k in ("update_num", "stage", "avg_delta")}
+    except Exception:
+        return {}
 
-def _make_opponent(stage: int, seat: int):
+
+# Interactive startup prompt
+
+def _startup(run_name: Optional[str]) -> tuple:
+    """
+    Returns (run_dir, should_resume, resolved_run_name).
+
+    If run_name is given:
+      - If checkpoints/<run_name>/latest.pt exists → ask to resume.
+      - Otherwise → start fresh under that name.
+
+    If run_name is None:
+      - Scan checkpoints/ for existing runs and present a menu.
+      - User can pick a run to resume, or type a name / press Enter for new.
+    """
+    ck_root = "checkpoints"
+
+    def _run_dir(name): return os.path.join(ck_root, name)
+    def _latest(name):  return os.path.join(_run_dir(name), "latest.pt")
+
+    # Named run
+    if run_name is not None:
+        run_dir = _run_dir(run_name)
+        if os.path.exists(_latest(run_name)):
+            meta = _read_meta(_latest(run_name))
+            print(
+                f"\n  {BOLD}Existing run '{run_name}':{RESET}  "
+                f"update={meta.get('update_num','?')}  "
+                f"stage={meta.get('stage','?')}  "
+                f"avg_delta={meta.get('avg_delta', 0.0):.3f}"
+            )
+            print(f"  Resume? (y/n): ", end="", flush=True)
+            resume = input().strip().lower() in ("y", "yes", "")
+        else:
+            resume = False
+            print(f"\n  Starting new run: {BOLD}{run_name}{RESET}")
+        return run_dir, resume, run_name
+
+    # Auto-discover existing runs
+    existing = []
+    if os.path.isdir(ck_root):
+        for entry in sorted(os.listdir(ck_root)):
+            lp = _latest(entry)
+            if os.path.exists(lp):
+                existing.append((entry, _read_meta(lp)))
+
+    if not existing:
+        # First ever run
+        name    = time.strftime("run_%Y%m%d_%H%M%S")
+        run_dir = _run_dir(name)
+        print(f"\n  No existing runs found.  Starting: {BOLD}{name}{RESET}")
+        return run_dir, False, name
+
+    print(f"\n  {BOLD}{CYAN}Existing training runs:{RESET}")
+    for i, (name, meta) in enumerate(existing, 1):
+        print(
+            f"    [{i}] {name:<30}  "
+            f"update={meta.get('update_num','?'):>5}  "
+            f"stage={meta.get('stage','?')}  "
+            f"avg_delta={meta.get('avg_delta', 0.0):>+7.3f}"
+        )
+    print(f"    [N] Start a new run\n")
+    print(f"  Choice (number, name for new run, or Enter for latest): ", end="", flush=True)
+    raw = input().strip()
+
+    if raw.upper() == "N":
+        new_name = time.strftime("run_%Y%m%d_%H%M%S")
+        print(f"  Starting new run: {BOLD}{new_name}{RESET}")
+        return _run_dir(new_name), False, new_name
+
+    if raw == "":
+        # Default: resume the most recently modified run
+        name, meta = existing[-1]
+        print(f"  Resuming latest: {BOLD}{name}{RESET}")
+        return _run_dir(name), True, name
+
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(existing):
+            name, meta = existing[idx]
+            print(f"  Resuming: {BOLD}{name}{RESET}")
+            return _run_dir(name), True, name
+
+    # Treat as a new run name
+    new_name = raw
+    run_dir  = _run_dir(new_name)
+    lp       = _latest(new_name)
+    if os.path.exists(lp):
+        meta = _read_meta(lp)
+        print(
+            f"  Found existing run '{new_name}': "
+            f"update={meta.get('update_num','?')}, "
+            f"stage={meta.get('stage','?')}"
+        )
+        print(f"  Resume? (y/n): ", end="", flush=True)
+        resume = input().strip().lower() in ("y", "yes", "")
+    else:
+        resume = False
+        print(f"  Starting new run: {BOLD}{new_name}{RESET}")
+    return run_dir, resume, new_name
+
+
+# Opponent factories
+
+def _make_opponent(stage: int, seat: int,
+                   pool: SelfPlayPool, current_net: PokerNetwork):
     if stage == 1:
         return RandomBot(seat)
-    elif stage == 2:
+    if stage == 2:
         return random.choice([CallBot, TightBot, PositionBot])(seat)
-    else:
-        return RandomBot(seat)  # placeholder until self-play pool is implemented
+    # Stage 3 — self-play pool
+    net = pool.sample_opponent_network(current_net)
+    tag = "Cur" if net is current_net else "Old"
+    return RLBot(seat, net, starting_stack=STARTING_STACK, name=f"SelfPlay({tag})")
 
 
-def _setup_session(stage, training_bots, delta_history):
+# Session setup
+
+def _setup_session(
+    stage:          int,
+    training_bots:  Dict[int, TrainingBot],
+    delta_history,
+    hands_csv:      str,
+    session_num:    int,
+    pool:           SelfPlayPool,
+    current_net:    PokerNetwork,
+) -> GameSession:
+
     session = GameSession(starting_stack=STARTING_STACK)
 
     for seat in range(NUM_PLAYERS):
         if seat in TRAINING_SEATS:
             session.assign_bot(seat, training_bots[seat])
         else:
-            session.assign_bot(seat, _make_opponent(stage, seat))
+            session.assign_bot(seat, _make_opponent(stage, seat, pool, current_net))
 
     def on_hand_end(result):
-        # Capture delta BEFORE finish_hand() updates starting_stack
         deltas = []
+        row    = [session_num, result.hand_number, stage]
+
         for seat in TRAINING_SEATS:
             before = training_bots[seat].starting_stack
             after  = result.stacks_after.get(seat, before)
-            deltas.append((after - before) / BIG_BLIND)
-        delta_history.append(sum(deltas) / len(deltas))
-
-        # Now update starting_stack
-        for seat in TRAINING_SEATS:
+            delta  = (after - before) / BIG_BLIND
+            deltas.append(delta)
+            row.append(f"{delta:.4f}")
+            # finish_hand uses starting_stack as "before" → call FIRST
             training_bots[seat].finish_hand(result)
+            training_bots[seat].starting_stack = after
+
+        delta_history.append(sum(deltas) / len(deltas))
+        _write_csv(hands_csv, row)
 
     session.on_hand_end = on_hand_end
     return session
 
-# Chip Delta tracking
 
-def _record_hand_deltas(hand_result, training_bots, delta_history):
+# Mini ladder evaluation (every LADDER_EVAL_INTERVAL updates)
+
+_LADDER_OPPONENTS = {
+    "RandomBot":   RandomBot,
+    "CallBot":     CallBot,
+    "TightBot":    TightBot,
+    "PositionBot": PositionBot,
+}
+
+
+def _mini_eval(network: PokerNetwork) -> Dict[str, float]:
     """
-    After each hand, compute the average chip delta across all training bots
-    and append one value per hand to the history deque.
-
-    Delta is normalised by big blind so it's in BB/hand units.
+    Run LADDER_EVAL_HANDS hands against each of the four built-in bot types.
+    Returns {bot_name: avg_delta_bb_per_hand}.
     """
-    deltas = []
-    for seat in TRAINING_SEATS:
-        before = training_bots[seat].starting_stack
-        after  = hand_result.stacks_after.get(seat, before)
-        delta  = (after - before) / BIG_BLIND
-        deltas.append(delta)
-    delta_history.append(sum(deltas) / len(deltas))
+    results = {}
+    for bot_name, bot_cls in _LADDER_OPPONENTS.items():
+        total_delta = 0.0
+        total_hands = 0
+        buf         = []
+
+        rl = TrainingBot(
+            player_id     = 0,
+            network       = network,
+            shared_buffer = buf,
+            starting_stack= STARTING_STACK,
+            big_blind     = BIG_BLIND,
+        )
+        session = GameSession(starting_stack=STARTING_STACK)
+        session.assign_bot(0, rl)
+        for seat in range(1, NUM_PLAYERS):
+            session.assign_bot(seat, bot_cls(seat))
+
+        def _on_hand(res, _rl=rl):
+            nonlocal total_delta
+            after  = res.stacks_after.get(0, _rl.starting_stack)
+            total_delta += (after - _rl.starting_stack) / BIG_BLIND
+            _rl.finish_hand(res)
+            _rl.starting_stack = after
+
+        session.on_hand_end = _on_hand
+        session.run(max_hands=LADDER_EVAL_HANDS)
+        total_hands       = session.hand_number
+        results[bot_name] = total_delta / max(total_hands, 1)
+
+    return results
 
 
-def _avg_delta(delta_history):
-    if not delta_history:
-        return 0.0
-    return sum(delta_history) / len(delta_history)
+# Average chip delta helper
+
+def _avg(history) -> float:
+    return sum(history) / len(history) if history else 0.0
 
 
 # Main Training Loop
 
-def train(resume: bool = False):
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+def train(run_name: Optional[str] = None):
+    # Startup
+    run_dir, resume, run_name = _startup(run_name)
 
+    ck_dir  = run_dir # checkpoints/<name>/
+    snap_dir= os.path.join("snapshots",   run_name)
+    log_dir = os.path.join("logs",        run_name)
+    tb_dir  = os.path.join("tensorboard", run_name)
+
+    for d in (ck_dir, snap_dir, log_dir, tb_dir):
+        _ensure(d)
+
+    # CSV init 
+    train_csv = os.path.join(log_dir, "training_log.csv")
+    hands_csv = os.path.join(log_dir, "hands_log.csv")
+    eval_csv  = os.path.join(log_dir, "eval_log.csv")
+
+    _init_csv(train_csv, [
+        "timestamp", "update_num", "stage", "avg_delta",
+        "policy_loss", "value_loss", "entropy", "explained_variance",
+        "fold%", "check%", "call%", "bet_half%", "bet_pot%", "bet_double%", "allin%",
+    ])
+    _init_csv(hands_csv, [
+        "session_num", "hand_num", "stage",
+        *[f"delta_seat{s}" for s in TRAINING_SEATS],
+    ])
+    _init_csv(eval_csv, [
+        "update_num", "vs_RandomBot", "vs_CallBot", "vs_TightBot", "vs_PositionBot",
+    ])
+
+    # TensorBoard
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=tb_dir)
+        _log(f"TensorBoard → {tb_dir}   (tensorboard --logdir {tb_dir})")
+    except ImportError:
+        writer = None
+        _log("tensorboard not installed — skipping (pip install tensorboard)")
+
+    # Network, trainer, shared experience buffer
     network       = PokerNetwork()
     trainer       = PPOTrainer(network)
-    shared_buffer = []
+    shared_buffer : List[Experience] = []
 
     training_bots = {
         seat: TrainingBot(
-            player_id=seat,
-            network=network,
-            shared_buffer=shared_buffer,
-            starting_stack=STARTING_STACK,
-            big_blind=BIG_BLIND,
+            player_id     = seat,
+            network       = network,
+            shared_buffer = shared_buffer,
+            starting_stack= STARTING_STACK,
+            big_blind     = BIG_BLIND,
         )
         for seat in TRAINING_SEATS
     }
 
-    update_num    = 0
-    stage         = 1
-    delta_history = deque(maxlen=DELTA_HISTORY_SIZE)
+    pool           = SelfPlayPool(snapshot_dir=snap_dir)
+    update_num     = 0
+    stage          = 1
+    delta_history  = deque(maxlen=DELTA_HISTORY_SIZE)
+    session_count  = 0
+    hands_pending  = 0    # hands accumulated since last PPO update
 
+    # Resume
     if resume:
-        latest = os.path.join(CHECKPOINT_DIR, "latest.pt")
-        update_num, stage, delta_history = load_checkpoint(
-            network, trainer.optimizer, latest
+        latest = os.path.join(ck_dir, "latest.pt")
+        update_num, stage, delta_history = _load(network, trainer.optimizer, latest)
+
+    _log(
+        f"Run '{run_name}'  stage={stage}  "
+        f"{'resumed' if resume else 'fresh start'}"
+    )
+    if writer:
+        writer.add_text(
+            "run_info",
+            f"name={run_name}  stage={stage}  resumed={resume}",
+            global_step=update_num,
         )
 
-    _log(f"Training started -- stage {stage}")
-
-    hands_since_update = 0
-    session_count      = 0
-
+    # Training Loop
     while True:
 
-        # --- Run one session ---
-        session = _setup_session(stage, training_bots, delta_history)
-        result  = session.run(max_hands=ROLLOUT_HANDS)
+        # Collect one session
+        session_count += 1
+        session = _setup_session(
+            stage, training_bots, delta_history,
+            hands_csv, session_count, pool, network,
+        )
+        session.run(max_hands=ROLLOUT_HANDS)
+        hands_pending += session.hand_number
 
-        session_count      += 1
-        hands_since_update += session.hand_number
-
-        # Reset training bot stacks for next session
+        # Reset bot stacks to STARTING_STACK so delta is measured per-session
         for seat in TRAINING_SEATS:
             training_bots[seat].reset_starting_stack(STARTING_STACK)
 
-        avg = _avg_delta(delta_history)
+        avg = _avg(delta_history)
         print(
             f"\r  session={session_count}  "
-            f"hands_this_rollout={hands_since_update}/{ROLLOUT_HANDS}  "
-            f"stage={stage}  "
-            f"avg_delta={avg:>+7.3f} BB/hand",
+            f"pending={hands_pending}/{ROLLOUT_HANDS}  "
+            f"stage={stage}  avg_delta={avg:>+7.3f} BB/hand",
             end="", flush=True,
         )
 
-        # --- PPO update ---
-        if hands_since_update >= ROLLOUT_HANDS and shared_buffer:
-            print()
-            stats              = trainer.update(shared_buffer)
-            shared_buffer.clear()
-            hands_since_update = 0
-            update_num        += 1
+        # PPO update
+        if hands_pending < ROLLOUT_HANDS or not shared_buffer:
+            continue
 
-            avg = _avg_delta(delta_history)
-            _log_stats(update_num, stage, avg, stats)
+        print()   # end the \r line
 
-            # Periodic checkpoint
-            if update_num % CHECKPOINT_INTERVAL == 0:
-                path = os.path.join(CHECKPOINT_DIR, f"update_{update_num}.pt")
-                save_checkpoint(network, trainer.optimizer, update_num, stage, delta_history, path)
-                save_checkpoint(network, trainer.optimizer, update_num, stage, delta_history,
-                                os.path.join(CHECKPOINT_DIR, "latest.pt"))
+        # Compute action distribution BEFORE clearing the buffer
+        action_dist = Counter(ActionType(e.action) for e in shared_buffer)
 
-            # Curriculum graduation -- only check once we have enough data
-            if len(delta_history) >= DELTA_HISTORY_SIZE:
-                if stage == 1 and avg >= STAGE_1_THRESHOLD:
-                    stage = 2
-                    delta_history.clear()
-                    _log("Graduated to stage 2 -- mixed opponents")
-                    save_checkpoint(network, trainer.optimizer, update_num, stage,
-                                    delta_history, os.path.join(CHECKPOINT_DIR, "stage2_start.pt"))
+        stats          = trainer.update(shared_buffer)
+        shared_buffer.clear()
+        hands_pending  = 0
+        update_num    += 1
+        avg            = _avg(delta_history)
 
-                elif stage == 2 and avg >= STAGE_2_THRESHOLD:
-                    stage = 3
-                    delta_history.clear()
-                    _log("Graduated to stage 3 -- self play")
-                    save_checkpoint(network, trainer.optimizer, update_num, stage,
-                                    delta_history, os.path.join(CHECKPOINT_DIR, "stage3_start.pt"))
+        _log_update(update_num, stage, avg, stats, action_dist)
 
+        # CSV append
+        _write_csv(train_csv, [
+            _ts(), update_num, stage, f"{avg:.4f}",
+            f"{stats['policy_loss']:.6f}",
+            f"{stats['value_loss']:.6f}",
+            f"{stats['entropy']:.6f}",
+            f"{stats.get('explained_variance', 0.0):.4f}",
+            *_action_pcts(action_dist),
+        ])
+
+        # TensorBoard 
+        if writer:
+            writer.add_scalar("train/avg_delta",         avg,                               update_num)
+            writer.add_scalar("train/policy_loss",       stats["policy_loss"],              update_num)
+            writer.add_scalar("train/value_loss",        stats["value_loss"],               update_num)
+            writer.add_scalar("train/entropy",           stats["entropy"],                  update_num)
+            writer.add_scalar("train/explained_variance",stats.get("explained_variance", 0),update_num)
+            writer.add_scalar("train/stage",             stage,                             update_num)
+            total_a = sum(action_dist.values()) or 1
+            for atype in ActionType:
+                pct = action_dist.get(atype, 0) / total_a * 100
+                writer.add_scalar(f"actions/{atype.name}", pct, update_num)
+
+        # Explained-variance warning
+        ev = stats.get("explained_variance", 1.0)
+        if ev < RF_EXP_VAR:
+            _log(f"{RED}⚠  Explained variance {ev:.3f} < {RF_EXP_VAR} — "
+                 f"value head may be under-fitting{RESET}")
+
+        # Periodic checkpoint
+        if update_num % CHECKPOINT_INTERVAL == 0:
+            _save(network, trainer.optimizer, update_num, stage, delta_history,
+                  os.path.join(ck_dir, f"update_{update_num}.pt"))
+        # Always refresh latest.pt
+        _save(network, trainer.optimizer, update_num, stage, delta_history,
+              os.path.join(ck_dir, "latest.pt"))
+
+        # Self-play snapshot
+        if update_num % SNAPSHOT_INTERVAL == 0:
+            pool.save_snapshot(network, update_num)
+            _log(f"Self-play snapshot saved  (pool size: {len(pool)})")
+            if writer:
+                writer.add_scalar("pool/size", len(pool), update_num)
+
+        # Bot-ladder evaluation
+        if update_num % LADDER_EVAL_INTERVAL == 0:
+            _log("Running ladder evaluation…")
+            eval_res = _mini_eval(network)
+            line = "  eval:  " + "   ".join(
+                f"vs {n}={d:>+.1f}" for n, d in eval_res.items()
+            )
+            print(line, flush=True)
+            _write_csv(eval_csv, [update_num,
+                *[f"{eval_res.get(b, 0.0):.4f}"
+                  for b in ("RandomBot", "CallBot", "TightBot", "PositionBot")]])
+            if writer:
+                for bot_name, delta in eval_res.items():
+                    writer.add_scalar(f"eval/vs_{bot_name}", delta, update_num)
+
+        # Curriculum graduation
+        if len(delta_history) >= DELTA_HISTORY_SIZE:
+            if stage == 1 and avg >= STAGE_1_THRESHOLD:
+                stage = 2
+                delta_history.clear()
+                _log(f"{CYAN}Graduated to stage 2 — mixed opponents{RESET}")
+                if writer:
+                    writer.add_text("graduation",
+                                    f"Stage 2 at update {update_num}", update_num)
+                _save(network, trainer.optimizer, update_num, stage, delta_history,
+                      os.path.join(ck_dir, "stage2_start.pt"))
+
+            elif stage == 2 and avg >= STAGE_2_THRESHOLD:
+                stage = 3
+                delta_history.clear()
+                _log(f"{CYAN}Graduated to stage 3 — self-play{RESET}")
+                if writer:
+                    writer.add_text("graduation",
+                                    f"Stage 3 at update {update_num}", update_num)
+                _save(network, trainer.optimizer, update_num, stage, delta_history,
+                      os.path.join(ck_dir, "stage3_start.pt"))
+
+
+# Entry Point
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+
+    parser = argparse.ArgumentParser(
+        description="Train a poker RL bot.  Named runs keep experiments isolated."
+    )
+    parser.add_argument(
+        "--name", "-n",
+        type=str, default=None,
+        metavar="RUN_NAME",
+        help=(
+            "Name for this training run.  All artifacts are stored under "
+            "checkpoints/<name>/, logs/<name>/, etc.  "
+            "If omitted you are shown an interactive menu."
+        ),
+    )
     args = parser.parse_args()
-    train(resume=args.resume)
+    train(run_name=args.name)

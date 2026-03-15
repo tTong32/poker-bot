@@ -18,21 +18,24 @@ from .evaluator import hand_rank_name, evaluate_hand
 from .session import GameSession, HandResult
 from .bots import TightBot, PositionBot, RandomBot, CallBot
 
+# Lazy import — only available if PyTorch is installed
+try:
+    from training_bot.rl_bot import RLBot
+    _RL_AVAILABLE = True
+except ImportError:
+    _RL_AVAILABLE = False
 
-# --------------------------------------------------------------------------- #
-# Formatting helpers                                                           #
-# --------------------------------------------------------------------------- #
 
 SUIT_COLORS = {
-    "♦": "\033[91m",   # red
-    "♣": "\033[92m",   # green
-    "♥": "\033[91m",   # red
-    "♠": "\033[97m",   # white
+    "♦": "\033[91m",
+    "♣": "\033[92m",
+    "♥": "\033[91m",
+    "♠": "\033[97m",
 }
-RESET = "\033[0m"
-BOLD  = "\033[1m"
-DIM   = "\033[2m"
-CYAN  = "\033[96m"
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+CYAN   = "\033[96m"
 YELLOW = "\033[93m"
 GREEN  = "\033[92m"
 RED    = "\033[91m"
@@ -67,7 +70,6 @@ def _header(text: str):
 
 # STATE DISPLAY
 def display_state(state: GameState, human_seat: int, show_all_hands: bool = False):
-    """Render the full table to the terminal."""
     _clear()
     _hr("═")
     print(f"  {BOLD}Texas Hold'em{RESET}   "
@@ -75,17 +77,14 @@ def display_state(state: GameState, human_seat: int, show_all_hands: bool = Fals
           f"Pot: {YELLOW}{state.pot:.1f}{RESET}")
     _hr("═")
 
-    # Board
     board_str = _fmt_cards(state.board) if state.board else f"{DIM}(waiting for cards){RESET}"
     print(f"\n  Board:  {board_str}\n")
     _hr()
 
-    # Players
     for p in state.players:
         is_current = (not state.terminal and p.id == state.current_player_index)
         is_human   = (p.id == human_seat)
 
-        # Status tag
         if p.has_folded:
             status = f"{DIM}FOLDED {RESET}"
         elif p.is_all_in:
@@ -95,11 +94,9 @@ def display_state(state: GameState, human_seat: int, show_all_hands: bool = Fals
         else:
             status = f"{GREEN}active{RESET}"
 
-        # Arrow for current player
         arrow = f" {BOLD}◄ YOUR TURN{RESET}" if (is_current and is_human) else \
                 f" {DIM}◄ thinking...{RESET}" if is_current else ""
 
-        # Hand display
         if is_human or show_all_hands:
             hand_str = _fmt_cards(p.hand) if p.hand else "—"
         else:
@@ -110,13 +107,10 @@ def display_state(state: GameState, human_seat: int, show_all_hands: bool = Fals
               f"bet={p.current_bet:>6.1f}  [{status}]  {hand_str}{arrow}")
 
     _hr()
-
-    # Dealer indicator
     print(f"  {DIM}Dealer button: Player {state.dealer_index}{RESET}\n")
 
 
 def display_hand_result(state: GameState, human_seat: int):
-    """Show the final result of the hand with revealed cards."""
     display_state(state, human_seat, show_all_hands=True)
 
     if state.winners:
@@ -129,7 +123,6 @@ def display_hand_result(state: GameState, human_seat: int):
         else:
             print(f"  {BOLD}{RED}💀  You lose.  Winner: {', '.join(names)}{RESET}\n")
 
-    # Show hand rankings at showdown
     active = [p for p in state.players if not p.has_folded]
     if len(active) > 1 and state.board:
         print(f"  {DIM}Hand rankings:{RESET}")
@@ -154,8 +147,7 @@ _ACTION_LABELS = {
 
 
 def prompt_action(state: GameState, legal_actions: List[Action]) -> Action:
-    """Display action menu and read player input."""
-    player = state.current_player
+    player      = state.current_player
     call_amount = state.current_bet - player.current_bet
 
     print(f"  {BOLD}Your hand:{RESET}  {_fmt_cards(player.hand)}")
@@ -169,7 +161,7 @@ def prompt_action(state: GameState, legal_actions: List[Action]) -> Action:
         amount_str = f"  ({action.amount:.1f})" if action.amount > 0 else ""
         print(f"    [{key}] {label}{amount_str}")
         key_map[key.lower()] = action
-        key_map[str(i)] = action   # also accept index
+        key_map[str(i)]      = action
 
     print()
 
@@ -198,7 +190,7 @@ def display_session_summary(session: GameSession, human_seat: int):
     print(f"  {BOLD}{CYAN}Session Over — {session.hand_number} hands played{RESET}")
     _hr("═")
 
-    stacks = {p.id: p.stack for p in session.game.players}
+    stacks         = {p.id: p.stack for p in session.game.players}
     sorted_players = sorted(stacks.items(), key=lambda x: -x[1])
 
     print(f"\n  {BOLD}Final standings:{RESET}")
@@ -208,15 +200,14 @@ def display_session_summary(session: GameSession, human_seat: int):
         print(f"  {rank}. {name:>5}  {_fmt_stack(stack)}  {DIM}{bar}{RESET}")
 
     print()
-    winner_id, winner_stack = sorted_players[0]
-    winner_name = "You" if winner_id == human_seat else f"Bot{winner_id}"
+    winner_id, _ = sorted_players[0]
+    winner_name  = "You" if winner_id == human_seat else f"Bot{winner_id}"
     if winner_id == human_seat:
         print(f"  {BOLD}{GREEN}🏆  Congratulations! You win the session!{RESET}\n")
     else:
         print(f"  {RED}Better luck next time. {winner_name} wins the session.{RESET}\n")
 
 
-# SETUP
 BOT_TYPES = {
     "1": ("TightBot",    lambda seat: TightBot(seat)),
     "2": ("PositionBot", lambda seat: PositionBot(seat)),
@@ -224,9 +215,30 @@ BOT_TYPES = {
     "4": ("RandomBot",   lambda seat: RandomBot(seat)),
 }
 
+if _RL_AVAILABLE:
+    BOT_TYPES["5"] = ("RLBot", None)   # factory set later after checkpoint prompt
+
+
+def _prompt_rl_factory(stack: float):
+    """Ask for a checkpoint path and return an RLBot factory."""
+    print(f"\n  {BOLD}RLBot checkpoint path{RESET}")
+    print(f"  (e.g. checkpoints/my_run/latest.pt): ", end="", flush=True)
+    path = input().strip()
+    if not path:
+        print(f"  {RED}No path given — falling back to PositionBot.{RESET}")
+        return "PositionBot", lambda seat: PositionBot(seat)
+    if not os.path.exists(path):
+        print(f"  {RED}File not found: {path}  — falling back to PositionBot.{RESET}")
+        return "PositionBot", lambda seat: PositionBot(seat)
+    try:
+        factory = RLBot.make_factory(path, starting_stack=stack)
+        print(f"  {GREEN}Loaded RLBot from {path}{RESET}")
+        return "RLBot", factory
+    except Exception as e:
+        print(f"  {RED}Failed to load checkpoint: {e}  — falling back to PositionBot.{RESET}")
+        return "PositionBot", lambda seat: PositionBot(seat)
 
 def _setup_wizard():
-    """Interactive setup: choose seat, stack, bot opponents, max hands."""
     _clear()
     _hr("═")
     print(f"  {BOLD}{CYAN}Texas Hold'em — Setup{RESET}")
@@ -243,25 +255,34 @@ def _setup_wizard():
     # Human seat
     print(f"  Your seat (0–5, default 0): ", end="")
     try:
-        raw = input().strip()
+        raw        = input().strip()
         human_seat = int(raw) if raw else 0
         human_seat = max(0, min(5, human_seat))
     except ValueError:
         human_seat = 0
 
-    # Bot types
+    # Bot type
     print(f"\n  Bot type for opponents:")
     for k, (name, _) in BOT_TYPES.items():
         print(f"    [{k}] {name}")
-    print(f"  Choose (default 2 = PositionBot): ", end="")
-    raw = input().strip()
-    bot_key = raw if raw in BOT_TYPES else "2"
-    bot_name, bot_factory = BOT_TYPES[bot_key]
+    if not _RL_AVAILABLE:
+        print(f"    {DIM}[5] RLBot  (unavailable — install PyTorch){RESET}")
+
+    default_key = "2"
+    print(f"  Choose (default {default_key} = PositionBot): ", end="")
+    raw     = input().strip()
+    bot_key = raw if raw in BOT_TYPES else default_key
+
+    if bot_key == "5":
+        # RLBot — prompt for checkpoint
+        bot_name, bot_factory = _prompt_rl_factory(stack)
+    else:
+        bot_name, bot_factory = BOT_TYPES[bot_key]
 
     # Max hands
     print(f"\n  Max hands to play (default 50): ", end="")
     try:
-        raw = input().strip()
+        raw       = input().strip()
         max_hands = int(raw) if raw else 50
     except ValueError:
         max_hands = 50
@@ -281,22 +302,19 @@ def run_cli():
     print(f"  {DIM}Press Enter to start...{RESET}", end="")
     input()
 
-    # Wire up callbacks
     def on_state(state: GameState):
         if state.terminal:
             display_hand_result(state, human_seat)
             input(f"  {DIM}Press Enter for next hand...{RESET}")
         else:
-            # Always redraw so the human can see what bots did
             display_state(state, human_seat)
             if state.current_player_index != human_seat:
-                # Brief pause so bot actions are visible
                 time.sleep(0.6)
 
     session.on_state_change = on_state
     session.human_input_fn  = prompt_action
 
-    result = session.run(max_hands=max_hands)
+    session.run(max_hands=max_hands)
     display_session_summary(session, human_seat)
 
 

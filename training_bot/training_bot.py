@@ -143,7 +143,6 @@ class TrainingBot(Bot):
         self.shared_buffer.extend(self.hand_experiences)
 
         # Reset for next hand
-        self.starting_stack = current_stack
         self.hand_experiences = []
 
     def reset_starting_stack(self, stack: float) -> None:
