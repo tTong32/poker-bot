@@ -8,11 +8,12 @@ from .network import PokerNetwork
 
 CLIP_EPSILON    = 0.2      # max policy change per update step
 VALUE_COEFF     = 0.5      # how much value loss contributes
-ENTROPY_COEFF   = 0.01     # how much unpredictability is rewarded
+ENTROPY_COEFF   = 0.05     # how much unpredictability is rewarded
 GAMMA           = 0.999    # future reward discount
 LAMBDA          = 0.95     # GAE smoothing factor
 UPDATE_PASSES   = 4        # how many times to reuse each rollout
 LEARNING_RATE   = 3e-4     # optimizer step size
+REWARD_CLIP     = 10       # to maintain value_loss values
 
 class PPOTrainer:
     def __init__(self, network: PokerNetwork):
@@ -24,7 +25,7 @@ class PPOTrainer:
         )
 
     def _compute_advantages(self, experiences: List[Experience]):
-        rewards = np.array([e.reward for e in experiences])
+        rewards = np.clip([e.reward for e in experiences], -REWARD_CLIP, REWARD_CLIP)
         dones   = np.array([e.done   for e in experiences])
         obs     = np.array([e.obs    for e in experiences])
 

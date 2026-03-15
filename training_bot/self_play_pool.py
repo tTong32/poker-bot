@@ -86,7 +86,7 @@ class SelfPlayPool:
     def load_network(self, path: str) -> PokerNetwork:
         """Load a frozen PokerNetwork from a snapshot file."""
         net = PokerNetwork()
-        net.load_state_dict(torch.load(path, weights_only=True))
+        net.load_state_dict(torch.load(path, weights_only=False))
         net.eval()
         return net
 

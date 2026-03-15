@@ -129,7 +129,7 @@ class TrainingBot(Bot):
         if not self.hand_experiences:
             return
 
-        # Chip delta normalised by big blind
+        # Chip delta normalised by big blind    
         current_stack = hand_result.stacks_after.get(self.player_id, self.starting_stack)
         chip_delta = current_stack - self.starting_stack
         reward = chip_delta / self.big_blind

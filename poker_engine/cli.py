@@ -207,7 +207,6 @@ def display_session_summary(session: GameSession, human_seat: int):
     else:
         print(f"  {RED}Better luck next time. {winner_name} wins the session.{RESET}\n")
 
-
 BOT_TYPES = {
     "1": ("TightBot",    lambda seat: TightBot(seat)),
     "2": ("PositionBot", lambda seat: PositionBot(seat)),
@@ -222,7 +221,7 @@ if _RL_AVAILABLE:
 def _prompt_rl_factory(stack: float):
     """Ask for a checkpoint path and return an RLBot factory."""
     print(f"\n  {BOLD}RLBot checkpoint path{RESET}")
-    print(f"  (e.g. checkpoints/my_run/latest.pt): ", end="", flush=True)
+    print(f"  (e.g. runs/checkpoints/my_run/latest.pt): ", end="", flush=True)
     path = input().strip()
     if not path:
         print(f"  {RED}No path given — falling back to PositionBot.{RESET}")
@@ -313,6 +312,16 @@ def run_cli():
 
     session.on_state_change = on_state
     session.human_input_fn  = prompt_action
+
+    if _RL_AVAILABLE:
+        rl_bots = [b for b in session.bots.values() if isinstance(b, RLBot)]
+        if rl_bots:
+            def on_hand_end(result):
+                for bot in rl_bots:
+                    bot.notify_hand_end(result)
+            session.on_hand_end = on_hand_end
+
+    session.run(max_hands=max_hands)
 
     session.run(max_hands=max_hands)
     display_session_summary(session, human_seat)

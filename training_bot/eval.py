@@ -3,8 +3,8 @@ eval.py — Standalone evaluation for a trained RL bot.
 
 Run with:
     python -m training_bot.eval
-    python -m training_bot.eval --checkpoint checkpoints/myrun/latest.pt
-    python -m training_bot.eval --checkpoint checkpoints/myrun/update_500.pt --hands 5000
+    python -m training_bot.eval --checkpoint runs/checkpoints/myrun/latest.pt
+    python -m training_bot.eval --checkpoint runs/checkpoints/myrun/update_500.pt --hands 5000
 
 Evaluates against each of the four built-in bot types separately, then prints:
   • Avg chip delta per hand (in BB) against each opponent
@@ -31,7 +31,7 @@ from .training_bot import TrainingBot
 DEFAULT_EVAL_HANDS  = 10_000
 STARTING_STACK      = 1000.0
 BIG_BLIND           = STARTING_STACK / 100    # 10.0
-HANDS_PER_SESSION   = 1_000                   # cap per GameSession
+HANDS_PER_SESSION   = 1000                   # cap per GameSession
 
 # Red-flag thresholds
 RF_FOLD_RATE     = 0.60   # folding > 60% of decisions is a red flag
@@ -58,11 +58,11 @@ YELLOW = "\033[93m"
 # Checkpoint discovery
 
 def _find_latest_checkpoint() -> str:
-    """Search for latest.pt in checkpoints/<run>/ subdirectories."""
-    ck_root = "checkpoints"
+    """Search for latest.pt in runs/checkpoints/<run>/ subdirectories."""
+    ck_root = "runs/checkpoints"
     if not os.path.isdir(ck_root):
         raise FileNotFoundError(
-            "No checkpoints/ directory found.  Run train.py first, "
+            "No runs/checkpoints/ directory found.  Run train.py first, "
             "or pass --checkpoint explicitly."
         )
     candidates = []
@@ -72,7 +72,7 @@ def _find_latest_checkpoint() -> str:
             candidates.append((os.path.getmtime(candidate), candidate))
     if not candidates:
         raise FileNotFoundError(
-            "No latest.pt found under checkpoints/.  "
+            "No latest.pt found under runs/checkpoints/.  "
             "Pass --checkpoint <path> explicitly."
         )
     # Most recently modified

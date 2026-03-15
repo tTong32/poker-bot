@@ -11,18 +11,18 @@ resume an existing run or start a new one.
 
 Directory layout per run
 ------------------------
-    checkpoints/<run_name>/
+    runs/checkpoints/<run_name>/
         latest.pt            ← always points to the most recent update
         update_<N>.pt        ← periodic snapshots
         stage2_start.pt
         stage3_start.pt
-    snapshots/<run_name>/
+    runs/snapshots/<run_name>/
         snapshot_<N>.pt      ← self-play pool entries
-    logs/<run_name>/
+    runs/logs/<run_name>/
         training_log.csv     ← one row per PPO update
         hands_log.csv        ← one row per hand
         eval_log.csv         ← one row per ladder evaluation
-    tensorboard/<run_name>/
+    runs/tensorboard/<run_name>/
         events.out.*         ← live TensorBoard stream
 
 Curriculum stages
@@ -66,10 +66,11 @@ STAGE_2_THRESHOLD    = 2.0       # BB/hand avg to leave stage 2
 TRAINING_SEATS       = [0, 1, 2]
 
 # Red-flag thresholds (warnings printed to console)
-RF_FOLD_RATE     = 0.60
-RF_ALLIN_RATE    = 0.30
-RF_PASSIVE_RATE  = 0.80
-RF_EXP_VAR       = 0.30   # explained variance below this is concerning
+RF_FOLD_RATE      = 0.60
+RF_ALLIN_RATE     = 0.30
+RF_PASSIVE_RATE   = 0.80
+RF_EXP_VAR        = 0.30   # explained variance below this is concerning
+RF_ALLIN_COLLAPSE = 0.50   # check if the bot is going all in a lot
 
 # Terminal colours
 RESET  = "\033[0m"
@@ -144,6 +145,8 @@ def _log_update(update_num, stage, avg, stats, dist):
         print(f"  {RED}⚠ FOLD RATE {fold_r:.1%} > {RF_FOLD_RATE:.0%}{RESET}")
     if allin_r   > RF_ALLIN_RATE:
         print(f"  {RED}⚠ ALL-IN RATE {allin_r:.1%} > {RF_ALLIN_RATE:.0%}{RESET}")
+    if allin_r   > RF_ALLIN_COLLAPSE:
+        print(f"  {RED}⚠ ALL-IN COLLAPSE — bot is degenerating. Consider resetting or lowering REWARD_CLIP.{RESET}")
     if passive_r > RF_PASSIVE_RATE:
         print(f"  {RED}⚠ PASSIVE RATE {passive_r:.1%} > {RF_PASSIVE_RATE:.0%}{RESET}")
 
@@ -200,7 +203,7 @@ def _startup(run_name: Optional[str]) -> tuple:
       - Scan checkpoints/ for existing runs and present a menu.
       - User can pick a run to resume, or type a name / press Enter for new.
     """
-    ck_root = "checkpoints"
+    ck_root = "runs/checkpoints"
 
     def _run_dir(name): return os.path.join(ck_root, name)
     def _latest(name):  return os.path.join(_run_dir(name), "latest.pt")
@@ -403,9 +406,9 @@ def train(run_name: Optional[str] = None):
     run_dir, resume, run_name = _startup(run_name)
 
     ck_dir  = run_dir # checkpoints/<name>/
-    snap_dir= os.path.join("snapshots",   run_name)
-    log_dir = os.path.join("logs",        run_name)
-    tb_dir  = os.path.join("tensorboard", run_name)
+    snap_dir= os.path.join("runs/snapshots",   run_name)
+    log_dir = os.path.join("runs/logs",        run_name)
+    tb_dir  = os.path.join("runs/tensorboard", run_name)
 
     for d in (ck_dir, snap_dir, log_dir, tb_dir):
         _ensure(d)

@@ -106,7 +106,7 @@ if _RL_AVAILABLE:
 def _prompt_rl_factory(stack: float, seat: int) -> tuple:
     """Ask for a checkpoint path, return (display_name, factory) for this seat."""
     print(f"\n  {BOLD}RLBot checkpoint for seat {seat}:{RESET}")
-    print(f"  Path (e.g. checkpoints/my_run/latest.pt): ", end="", flush=True)
+    print(f"  Path (e.g. runs/checkpoints/my_run/latest.pt): ", end="", flush=True)
     path = input().strip()
 
     if not path or not os.path.exists(path):
@@ -196,6 +196,14 @@ def run_sim():
         session = GameSession(starting_stack=stack)
         for seat, (_, factory) in bot_assignments.items():
             session.assign_bot(seat, factory(seat))
+
+        if _RL_AVAILABLE:
+            rl_bots = [b for b in session.bots.values() if isinstance(b, RLBot)]
+            if rl_bots:
+                def on_hand_end(result, _bots=rl_bots):
+                    for bot in _bots:
+                        bot.notify_hand_end(result)
+                session.on_hand_end = on_hand_end
 
         result = session.run(max_hands=max_hands)
         all_results.append(result)

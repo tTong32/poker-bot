@@ -95,6 +95,11 @@ class RLBot(Bot):
                 return a
         return legal_actions[0]   # safety fallback
 
+    def notify_hand_end(self, hand_result) -> None:
+        new_stack = hand_result.stacks_after.get(self.player_id, self.starting_stack)
+        if new_stack > 0:
+            self.starting_stack = new_stack
+
     # Factory helpers 
 
     @classmethod
