@@ -149,6 +149,7 @@ class GameSession:
         if self.on_state_change:
             self.on_state_change(state)
 
+        hand_steps = 0;
         while not state.terminal:
             pid = state.current_player_index
             legal = self.game.get_legal_actions()
@@ -165,6 +166,11 @@ class GameSession:
 
             if self.on_state_change:
                 self.on_state_change(state)
+            
+            if hand_steps > 1000:
+                self.game.print_state()
+                raise RuntimeError(f"Hand {self.hand_number} exceeded 1000 steps — likely infinite loop")
+            hand_steps += 1
 
         return HandResult(
             hand_number=self.hand_number,

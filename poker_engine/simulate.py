@@ -36,27 +36,24 @@ def _hr(char="─", width=60):
 
 
 # Session Summary
-def display_session_summary(session: GameSession, start: float):
-    _clear()
+def display_session_summary(all_results: list, session_num: int, bot_assignments: dict):
+    result = all_results[session_num]
+    
     _hr("═")
-    elapsed = time.time() - start
-    print(f"  {BOLD}{CYAN}Session Over — {session.hand_number} hands played{RESET}")
-    print(f"  {BOLD}{CYAN}Time elapsed: {elapsed:.2f}s{RESET}")
-    print(f"  {BOLD}{CYAN}Hands per sec: {session.hand_number/elapsed:.0f}{RESET}")
+    print(f"  {BOLD}{CYAN}Session {session_num+1} — {result.total_hands} hands played{RESET}")
     _hr("═")
 
     win_counts = Counter()
-    for hand in session.hand_results:
+    for hand in result.hand_results:
         for winner_id in hand.winner_ids:
             win_counts[winner_id] += 1
 
     for pid in range(NUM_PLAYERS):
         wins = win_counts[pid]
-        win_rate = wins / session.hand_number * 100
+        win_rate = wins / result.total_hands * 100
         print(f"  Bot{pid}: {wins} wins ({win_rate:.1f}%)")
 
-    stacks = {p.id: p.stack for p in session.game.players}
-    sorted_players = sorted(stacks.items(), key=lambda x: -x[1])
+    sorted_players = sorted(result.final_stacks.items(), key=lambda x: -x[1])
 
     print(f"\n  {BOLD}Final standings:{RESET}")
     for rank, (pid, stack) in enumerate(sorted_players, 1):
@@ -69,6 +66,27 @@ def display_session_summary(session: GameSession, start: float):
     winner_name = f"Bot{winner_id}"
     print(f"  {RED}{winner_name} wins the session.{RESET}\n")
 
+def display_overall_summary(all_results, win_counts, total_hands, elapsed, bot_assignments):
+    _hr("═")
+    print(f"  {BOLD}{CYAN}Overall Summary — {len(all_results)} sessions{RESET}")
+    _hr("═")
+    print(f"  {BOLD}{CYAN}Total hands played: {total_hands}{RESET}")
+    print(f"  {BOLD}{CYAN}Time elapsed: {elapsed:.2f}s{RESET}")
+    print(f"  {BOLD}{CYAN}Hands per sec: {total_hands/elapsed:.0f}{RESET}")
+    _hr()
+
+    print(f"\n  {BOLD}Win counts:{RESET}")
+    for pid in range(NUM_PLAYERS):
+        bot_name, _ = bot_assignments[pid]
+        wins = win_counts[pid]
+        win_rate = wins / total_hands * 100
+        print(f"  Seat {pid} ({bot_name}): {wins} wins ({win_rate:.1f}%)")
+
+    print(f"\n  {BOLD}Average final stack:{RESET}")
+    for pid in range(NUM_PLAYERS):
+        bot_name, _ = bot_assignments[pid]
+        avg_stack = sum(r.final_stacks[pid] for r in all_results) / len(all_results)
+        print(f"  Seat {pid} ({bot_name}): {_fmt_stack(avg_stack)}")
 
 # SETUP
 BOT_TYPES = {
@@ -112,24 +130,62 @@ def _setup_wizard():
         max_hands = int(raw) if raw else 50
     except ValueError:
         max_hands = 50
+    
+    # Number of sessions
+    print(f"\n  Number of sessions (games) to play: ", end="")
+    try:
+        raw = input().strip()
+        num_sessions = int(raw) if raw else 1
+    except ValueError:
+        num_sessions = 1
 
-    return stack, bot_assignments, max_hands
+    return stack, num_sessions, bot_assignments, max_hands
 
 
 def run_sim():
-    stack, bot_assignments, max_hands = _setup_wizard()
-    session = GameSession(starting_stack=stack)
-    for seat, (bot_name, bot_factory) in bot_assignments.items():
-        session.assign_bot(seat, bot_factory(seat))
+    stack, num_sessions, bot_assignments, max_hands = _setup_wizard()
+
     for seat, (bot_name, _) in bot_assignments.items():
         print(f"  Seat {seat}: {bot_name}")
-    print(f"  Max hands: {max_hands}")
+    print(f"  Max hands: {max_hands}  |  Sessions: {num_sessions}")
     print(f"  {DIM}Press Enter to start...{RESET}", end="")
     input()
 
+    all_results = []
+    win_counts = Counter()
+    total_hands = 0
     start = time.time()
-    result = session.run(max_hands=max_hands)
-    display_session_summary(session, start)
+
+    for session_num in range(num_sessions):
+        session = GameSession(starting_stack=stack)
+        for seat, (bot_name, bot_factory) in bot_assignments.items():
+            session.assign_bot(seat, bot_factory(seat))
+
+        result = session.run(max_hands=max_hands)
+        all_results.append(result)
+        total_hands += session.hand_number
+
+        for hand in session.hand_results:
+            for winner_id in hand.winner_ids:
+                win_counts[winner_id] += 1
+        
+        print(f"\r  Running... session {session_num + 1}/{num_sessions}", end="", flush=True)
+
+    elapsed = time.time() - start
+    display_overall_summary(all_results, win_counts, total_hands, elapsed, bot_assignments)
+    while True:
+        print(f"\n  View a game summary? (1-{num_sessions}, or q to quit): ", end="")
+        raw = input().strip().lower()
+        if raw == "q":
+            break
+        try:
+            game_num = int(raw)
+            if 1 <= game_num <= num_sessions:
+                display_session_summary(all_results, game_num - 1, bot_assignments)
+            else:
+                print(f"  {RED}Enter a number between 1 and {num_sessions}{RESET}")
+        except ValueError:
+            print(f"  {RED}Invalid input{RESET}")
 
 
 if __name__ == "__main__":

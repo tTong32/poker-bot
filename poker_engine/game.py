@@ -243,7 +243,7 @@ class PokerGame:
         actable = self.state.players_who_can_act
         if not actable:
             return True  # everyone is all-in or folded
-        all_matched = all(p.current_bet == self.state.current_bet for p in actable)
+        all_matched = all(p.current_bet >= self.state.current_bet for p in actable)
         all_acted   = all(p.id in self.state.players_acted for p in actable)
         return all_matched and all_acted
 
