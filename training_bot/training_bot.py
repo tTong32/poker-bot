@@ -30,11 +30,12 @@ import torch
 
 @dataclass
 class Experience:
-    obs: np.ndarray          # 414-element observation vector
-    action: int              # ActionType value (0-6)
-    log_prob: float          # log probability of action at time of decision
-    reward: float = 0.0      # filled in retroactively at hand end
-    done: bool = False       # set to True on the last experience of a hand
+    obs: np.ndarray                    # 414-element observation vector
+    action: int                        # ActionType value (0-6)
+    log_prob: float                    # log probability of action at time of decision
+    reward: float = 0.0                # filled in retroactively at hand end
+    done: bool = False                 # set to True on the last experience of a hand
+    bust_penalty: float = 0.0          # Penalty for completely busting
 
 
 
@@ -53,7 +54,7 @@ class TrainingBot(Bot):
     def __init__(
         self,
         player_id: int,
-        network: "PokerNetwork", #temp
+        network: "PokerNetwork",
         shared_buffer: List[Experience],
         starting_stack: float = 1000.0,
         big_blind: float = 10.0,
@@ -102,10 +103,16 @@ class TrainingBot(Bot):
         chosen_type = ActionType(action_idx.item())
 
         # Record experience (reward and done filled in at hand end)
+
+        # Reduce the values of all_in (but winning will still reward the bot)
+        # immediate_reward = -0.3 if chosen_type == ActionType.ALL_IN else 0.0
+        immediate_reward = 0
+
         exp = Experience(
             obs=obs,
             action=action_idx.item(),
             log_prob=log_prob,
+            reward=immediate_reward,
         )
         self.hand_experiences.append(exp)
 
@@ -134,10 +141,14 @@ class TrainingBot(Bot):
         chip_delta = current_stack - self.starting_stack
         reward = chip_delta / self.big_blind
 
+        # went_bust = (current_stack == 0) #
+        # bust_penalty = -50.0 if went_bust else 0.0 #
+        bust_penalty = 0
+
         # Assign reward to all experiences this hand, mark last as done
-        for exp in self.hand_experiences:
-            exp.reward = reward
-        self.hand_experiences[-1].done = True
+        self.hand_experiences[-1].reward      += reward
+        self.hand_experiences[-1].done         = True
+        self.hand_experiences[-1].bust_penalty = bust_penalty
 
         # Flush to shared buffer
         self.shared_buffer.extend(self.hand_experiences)

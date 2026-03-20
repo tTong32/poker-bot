@@ -40,5 +40,11 @@ class PokerNetwork(nn.Module):
     def _init_weights(self):
         for module in self.modules():
             if isinstance(module, nn.Linear):
+                if module is self.value_head or module is self.policy_head:
+                    continue
                 nn.init.kaiming_normal_(module.weight, nonlinearity='relu')
-                nn.init.zeros_(module.bias) 
+                nn.init.zeros_(module.bias)
+        nn.init.uniform_(self.policy_head.weight, -0.03, 0.03)
+        nn.init.zeros_(self.policy_head.bias)
+        nn.init.uniform_(self.value_head.weight, -0.03, 0.03)
+        nn.init.zeros_(self.value_head.bias)

@@ -7,13 +7,15 @@ from .training_bot import Experience
 from .network import PokerNetwork
 
 CLIP_EPSILON    = 0.2      # max policy change per update step
-VALUE_COEFF     = 0.5      # how much value loss contributes
-ENTROPY_COEFF   = 0.05     # how much unpredictability is rewarded
+VALUE_COEFF     = 1.0      # how much value loss contributes
+ENTROPY_COEFF   = 0.01     # how much unpredictability is rewarded
 GAMMA           = 0.999    # future reward discount
 LAMBDA          = 0.95     # GAE smoothing factor
-UPDATE_PASSES   = 4        # how many times to reuse each rollout
+VALUE_PASSES    = 2        # how many times to reuse each rollout for values
+POLICY_PASSES   = 8        # how many times the value head gets passed
 LEARNING_RATE   = 3e-4     # optimizer step size
-REWARD_CLIP     = 10       # to maintain value_loss values
+REWARD_CLIP     = 3.0      # to maintain value_loss values
+BUST_PENALTY_CLIP = 50.0   # lower bound for bust_penalty (already negative)
 
 class PPOTrainer:
     def __init__(self, network: PokerNetwork):
@@ -23,50 +25,76 @@ class PPOTrainer:
             lr=LEARNING_RATE,
             weight_decay=1e-4,
         )
+        self._reward_clip = REWARD_CLIP
+
+    def set_reward_clip(self, value: float):
+        self._reward_clip = value
 
     def _compute_advantages(self, experiences: List[Experience]):
-        rewards = np.clip([e.reward for e in experiences], -REWARD_CLIP, REWARD_CLIP)
-        dones   = np.array([e.done   for e in experiences])
-        obs     = np.array([e.obs    for e in experiences])
+        # Split buffer into per-episode trajectories at every done boundary
+        # Each segment is one player's hand
+        trajectories = []
+        current = []
+        for exp in experiences:
+            current.append(exp)
+            if exp.done:
+                trajectories.append(current)
+                current = []
+        if current:          # any trailing incomplete episode
+            trajectories.append(current)
 
-        # Get value estimates for all observations
+        all_advantages = []
+        all_returns    = []
+
+        for traj in trajectories:
+            clipped = np.clip(
+                [e.reward for e in traj],
+                -self._reward_clip, self._reward_clip,
+            ).astype(np.float32)
+            bust    = np.clip(
+                [e.bust_penalty for e in traj],
+                -BUST_PENALTY_CLIP, 0.0,
+            ).astype(np.float32)
+            rewards = clipped + bust
+            obs     = np.array([e.obs for e in traj])
+
+            with torch.no_grad():
+                _, values = self.network(torch.FloatTensor(obs))
+            values = values.squeeze(-1).numpy()
+
+            advantages = np.zeros(len(traj), dtype=np.float32)
+            last_gae   = 0.0
+
+            for t in reversed(range(len(traj))):
+                # Always bootstrap from the next step WITHIN this trajectory only
+                # The last step is always terminal (done=True), so next_value = 0
+                next_value = values[t + 1] if t + 1 < len(traj) else 0.0
+                delta      = rewards[t] + GAMMA * next_value - values[t]
+                last_gae   = delta + GAMMA * LAMBDA * last_gae
+                advantages[t] = last_gae
+
+            returns = advantages + values
+            all_advantages.append(advantages)
+            all_returns.append(returns)
+
+        advantages = np.concatenate(all_advantages)
+        returns    = np.concatenate(all_returns)
+
+        # Recompute values for all experiences in one batch for EV calculation
+        obs_all = np.array([e.obs for e in experiences])
         with torch.no_grad():
-            _, values = self.network(torch.FloatTensor(obs))
-        values = values.squeeze(-1).numpy()
+            _, v_all = self.network(torch.FloatTensor(obs_all))
+        v_all = v_all.squeeze(-1).numpy()
 
-        # GAE calculation
-        advantages = np.zeros_like(rewards)
-        last_gae   = 0.0
-
-        for t in reversed(range(len(rewards))):
-            if dones[t]:
-                next_value = 0.0
-                last_gae   = 0.0
-            else:
-                next_value = values[t + 1] if t + 1 < len(values) else 0.0
-
-            delta      = rewards[t] + GAMMA * next_value - values[t]
-            last_gae   = delta + GAMMA * LAMBDA * last_gae
-            advantages[t] = last_gae
-
-        returns = advantages + values   # raw, before normalising
-
-        # Variance Explained:
-        # Measures how well the value function predicts actual returns.
-        # 1.0 = perfect prediction  |  0.0 = no better than baseline
-        # Negative values indicate the value head is actively misleading.
         var_returns = np.var(returns)
-        if var_returns > 1e-8:
-            explained_variance = float(
-                1.0 - np.var(returns - values) / var_returns
-            )
-        else:
-            explained_variance = 0.0
+        explained_variance = float(
+            1.0 - np.var(returns - v_all) / var_returns
+        ) if var_returns > 1e-8 else 0.0
 
-        # Normalise advantages for stable gradient magnitude
+        # Normalise advantages across all trajectories together
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        return (
+        return (    
             torch.FloatTensor(advantages),
             torch.FloatTensor(returns),
             explained_variance,
@@ -108,7 +136,39 @@ class PPOTrainer:
             'explained_variance': explained_variance,   # computed once, before weight updates
         }
 
-        for _ in range(UPDATE_PASSES):
+        obs_t = torch.FloatTensor(np.array([e.obs for e in experiences]))
+
+        # Value-only passes first — get the value head working before policy updates
+        for param in list(self.network.fc1.parameters()) + \
+                    list(self.network.fc2.parameters()) + \
+                    list(self.network.fc3.parameters()) + \
+                    list(self.network.ln1.parameters()) + \
+                    list(self.network.ln2.parameters()) + \
+                    list(self.network.ln3.parameters()) + \
+                    list(self.network.policy_head.parameters()):
+            param.requires_grad = False
+
+        for _ in range(VALUE_PASSES):
+            _, values = self.network(obs_t)
+            values     = values.squeeze(-1)
+            value_loss = nn.MSELoss()(values, returns)
+
+            self.optimizer.zero_grad()
+            value_loss.backward()
+            nn.utils.clip_grad_norm_(
+                self.network.value_head.parameters(), max_norm=2.0
+            )
+            self.optimizer.step()
+            stats['value_loss'] += value_loss.item()
+
+        # Unfreeze backbone for policy passes
+        for param in self.network.parameters():
+            param.requires_grad = True
+
+        stats['value_loss'] /= VALUE_PASSES
+
+        # Policy passes after value head has warmed up
+        for _ in range(POLICY_PASSES):
             loss, policy_loss, value_loss, entropy = self._compute_loss(
                 experiences, advantages, returns
             )
@@ -119,11 +179,9 @@ class PPOTrainer:
             self.optimizer.step()
 
             stats['policy_loss'] += policy_loss
-            stats['value_loss']  += value_loss
             stats['entropy']     += entropy
 
-        # Average the per-pass losses
-        for key in ('policy_loss', 'value_loss', 'entropy'):
-            stats[key] /= UPDATE_PASSES
+        stats['policy_loss'] /= POLICY_PASSES
+        stats['entropy']     /= POLICY_PASSES
 
         return stats
