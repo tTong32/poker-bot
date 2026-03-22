@@ -60,9 +60,16 @@ CHECKPOINT_INTERVAL  = 50        # PPO updates between checkpoints
 LADDER_EVAL_INTERVAL = 100       # PPO updates between ladder evaluations
 LADDER_EVAL_HANDS    = 1_000     # hands per opponent in the mini eval
 
+# unused
 STAGE_1_THRESHOLD    = 1.5       # BB/hand avg to leave stage 1
 STAGE_2_THRESHOLD    = 0.5       # BB/hand avg to leave stage 2
-MIN_UPDATES_PER_STAGE = 100
+
+MIN_UPDATES_PER_STAGE = {    
+    1: 150,   # ~375k hands at 2500/session
+    2: 150,
+    3: 200,
+    4: None,  # runs indefinitely
+}
 
 REWARD_CLIP_INITIAL  = 2.0
 REWARD_CLIP_MAX      = 10.0
@@ -83,7 +90,8 @@ RF_ALLIN_COLLAPSE = 0.50   # check if the bot is going all in a lot
 
 STAGE1_RESTRICTED = {ActionType.BET_DOUBLE_POT, ActionType.BET_POT, ActionType.ALL_IN}
 STAGE2_RESTRICTED = {ActionType.BET_DOUBLE_POT, ActionType.ALL_IN}
-STAGE3_RESTRICTED: set = set()
+STAGE3_RESTRICTED = {ActionType.ALL_IN}
+STAGE4_RESTRICTED: set = set()
 
 # Terminal colours
 RESET  = "\033[0m"
@@ -424,7 +432,7 @@ def _avg(history) -> float:
 
 
 def _update_restricted_actions(training_bots: dict, stage: int):
-    restrictions = {1: STAGE1_RESTRICTED, 2: STAGE2_RESTRICTED, 3: STAGE3_RESTRICTED}
+    restrictions = {1: STAGE1_RESTRICTED, 2: STAGE2_RESTRICTED, 3: STAGE3_RESTRICTED, 4: STAGE4_RESTRICTED}
     r = restrictions.get(stage, set())
     for bot in training_bots.values():
         bot.restricted_actions = r
@@ -634,34 +642,20 @@ def train(run_name: Optional[str] = None):
 
         # Curriculum graduation
         updates_in_stage = update_num - stage_start_update
-        if len(delta_history) >= DELTA_HISTORY_SIZE and updates_in_stage >= MIN_UPDATES_PER_STAGE:
+        min_updates = MIN_UPDATES_PER_STAGE.get(stage)
 
-            if stage == 1 and avg >= STAGE_1_THRESHOLD:
-                stage = 2
-                stage_start_update = update_num
-                delta_history.clear()
-                _update_restricted_actions(training_bots, stage)
-                _log(f"{CYAN}Graduated to stage 2 — mixed opponents{RESET}")
-                if writer:
-                    writer.add_text("graduation",
-                                    f"Stage 2 at update {update_num}", update_num)
-                _save(network, trainer.optimizer, update_num, stage, delta_history,
-                    os.path.join(ck_dir, "stage2_start.pt"),
-                    reward_clip=reward_clip, ev_stable_count=ev_stable_count)
-
-            elif stage == 2 and avg >= STAGE_2_THRESHOLD:
-                stage = 3
-                stage_start_update = update_num
-                delta_history.clear()
-                _update_restricted_actions(training_bots, stage)
-                _log(f"{CYAN}Graduated to stage 3 — self-play{RESET}")
-                if writer:
-                    writer.add_text("graduation",
-                                    f"Stage 3 at update {update_num}", update_num)
-                _save(network, trainer.optimizer, update_num, stage, delta_history,
-                    os.path.join(ck_dir, "stage3_start.pt"),
-                    reward_clip=reward_clip, ev_stable_count=ev_stable_count)
-
+        if min_updates is not None and updates_in_stage >= min_updates:
+            next_stage = stage + 1
+            stage = next_stage
+            stage_start_update = update_num
+            delta_history.clear()
+            _update_restricted_actions(training_bots, stage)
+            _log(f"{CYAN}Graduated to stage {stage}{RESET}")
+            if writer:
+                writer.add_text("graduation", f"Stage {stage} at update {update_num}", update_num)
+            _save(network, trainer.optimizer, update_num, stage, delta_history,
+                os.path.join(ck_dir, f"stage{stage}_start.pt"),
+                reward_clip=reward_clip, ev_stable_count=ev_stable_count)
 
 # Entry Point
 
