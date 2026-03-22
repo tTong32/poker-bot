@@ -19,13 +19,15 @@ from .side_pots import calculate_side_pots
 
 
 NUM_PLAYERS = 6
+ALL_IN_FRACTION = 0.35
 
 
 class PokerGame:
 
-    def __init__(self, starting_stack: float = 1000.0, seed: int | None = None):
+    def __init__(self, starting_stack: float = 1000.0, seed: int | None = None, training_mode: bool = False):
         self.starting_stack = starting_stack
         self.seed = seed
+        self.training_mode = training_mode
         # Big blind = starting_stack / 100; small blind = half that.
         self.big_blind = starting_stack / 100
         self.small_blind = self.big_blind / 2
@@ -86,6 +88,7 @@ class PokerGame:
             players_acted={self.players[sb_index].id, self.players[bb_index].id},
             terminal=False,
             winners=[],
+            last_actions={},
         )
         return self.state
 
@@ -147,9 +150,13 @@ class PokerGame:
                 if double and double.amount != (full.amount if full else -1):
                     actions.append(double)
 
-        # ALL_IN is always available if player has chips
+        # ALL_IN: fractional in training to extend session life, true all-in in play
         if player.stack > 0:
-            actions.append(Action(ActionType.ALL_IN, player.stack))
+            all_in_amount = (
+                min(player.stack, self.starting_stack * ALL_IN_FRACTION)
+                if self.training_mode else player.stack
+            )
+            actions.append(Action(ActionType.ALL_IN, all_in_amount))
 
         return actions
 
@@ -177,20 +184,22 @@ class PokerGame:
             self._place_bet_or_raise(player, action.amount)
 
         elif action.type == ActionType.ALL_IN:
-            amount = player.stack
+            amount = action.amount   # pre-computed in get_legal_actions (capped at stack)
             total_player_bet = player.current_bet + amount
             if total_player_bet > s.current_bet:
-                # This is effectively a raise
                 raise_size = total_player_bet - s.current_bet
                 s.last_raise_size = raise_size
                 s.current_bet = total_player_bet
                 s.raise_count += 1
-                s.players_acted = {player.id}  # everyone else must act again
+                s.players_acted = {player.id}
             self._commit(player, amount)
-            player.is_all_in = True
+            if player.stack == 0:
+                player.is_all_in = True
 
         else:
             raise ValueError(f"Unknown action type: {action.type}")
+
+        self.state.last_actions[player.id] = action.type.value
 
     def _place_bet_or_raise(self, player: Player, raise_amount: float):
         """

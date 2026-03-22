@@ -62,7 +62,7 @@ LADDER_EVAL_HANDS    = 1_000     # hands per opponent in the mini eval
 
 STAGE_1_THRESHOLD    = 1.5       # BB/hand avg to leave stage 1
 STAGE_2_THRESHOLD    = 0.5       # BB/hand avg to leave stage 2
-MIN_UPDATES_PER_STAGE = 30
+MIN_UPDATES_PER_STAGE = 100
 
 REWARD_CLIP_INITIAL  = 2.0
 REWARD_CLIP_MAX      = 10.0
@@ -80,6 +80,10 @@ RF_ALLIN_RATE     = 0.30
 RF_PASSIVE_RATE   = 0.80
 RF_EXP_VAR        = 0.30   # explained variance below this is concerning
 RF_ALLIN_COLLAPSE = 0.50   # check if the bot is going all in a lot
+
+STAGE1_RESTRICTED = {ActionType.BET_DOUBLE_POT, ActionType.BET_POT, ActionType.ALL_IN}
+STAGE2_RESTRICTED = {ActionType.BET_DOUBLE_POT, ActionType.ALL_IN}
+STAGE3_RESTRICTED: set = set()
 
 # Terminal colours
 RESET  = "\033[0m"
@@ -336,7 +340,7 @@ def _setup_session(
     current_net:    PokerNetwork,
 ) -> GameSession:
 
-    session = GameSession(starting_stack=STARTING_STACK)
+    session = GameSession(starting_stack=STARTING_STACK, training_mode=True)
 
     for seat in range(NUM_PLAYERS):
         if seat in TRAINING_SEATS:
@@ -393,7 +397,7 @@ def _mini_eval(network: PokerNetwork) -> Dict[str, float]:
             starting_stack= STARTING_STACK,
             big_blind     = BIG_BLIND,
         )
-        session = GameSession(starting_stack=STARTING_STACK)
+        session = GameSession(starting_stack=STARTING_STACK, training_mode=True)
         session.assign_bot(0, rl)
         for seat in range(1, NUM_PLAYERS):
             session.assign_bot(seat, bot_cls(seat))
@@ -417,6 +421,13 @@ def _mini_eval(network: PokerNetwork) -> Dict[str, float]:
 
 def _avg(history) -> float:
     return sum(history) / len(history) if history else 0.0
+
+
+def _update_restricted_actions(training_bots: dict, stage: int):
+    restrictions = {1: STAGE1_RESTRICTED, 2: STAGE2_RESTRICTED, 3: STAGE3_RESTRICTED}
+    r = restrictions.get(stage, set())
+    for bot in training_bots.values():
+        bot.restricted_actions = r
 
 
 # Main Training Loop
@@ -478,7 +489,7 @@ def train(run_name: Optional[str] = None):
 
     pool           = SelfPlayPool(snapshot_dir=snap_dir)
     update_num     = 0
-    stage          = 3 # change this back to 1 if needed
+    stage          = 1 # change this back to 1 if needed
     delta_history  = deque(maxlen=DELTA_HISTORY_SIZE)
     session_count  = 0
     hands_pending  = 0    # hands accumulated since last PPO update
@@ -497,6 +508,7 @@ def train(run_name: Optional[str] = None):
         f"Run '{run_name}'  stage={stage}  "
         f"{'resumed' if resume else 'fresh start'}"
     )
+    _update_restricted_actions(training_bots, stage)
     if writer:
         writer.add_text(
             "run_info",
@@ -628,6 +640,7 @@ def train(run_name: Optional[str] = None):
                 stage = 2
                 stage_start_update = update_num
                 delta_history.clear()
+                _update_restricted_actions(training_bots, stage)
                 _log(f"{CYAN}Graduated to stage 2 — mixed opponents{RESET}")
                 if writer:
                     writer.add_text("graduation",
@@ -640,6 +653,7 @@ def train(run_name: Optional[str] = None):
                 stage = 3
                 stage_start_update = update_num
                 delta_history.clear()
+                _update_restricted_actions(training_bots, stage)
                 _log(f"{CYAN}Graduated to stage 3 — self-play{RESET}")
                 if writer:
                     writer.add_text("graduation",

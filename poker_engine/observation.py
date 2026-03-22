@@ -70,6 +70,7 @@ NUM_ACTIONS   = 7     # matches ActionType enum (0–6)
 #   [405 : 406)   current bet       (1 float, normalised)
 #   [406 : 407)   amount to call    (1 float, normalised)
 #   [407 : 414)   legal action mask (7 bits)
+#   [414 : 456)   last action per player (6 players × 7 actions = 42 bits)
 
 _HOLE_START    = 0
 _HOLE_END      = 104
@@ -94,8 +95,10 @@ _CURRENT_BET   = 405
 _TO_CALL       = 406
 _MASK_START    = 407
 _MASK_END      = 414
+_LAST_ACT_START = 414
+_LAST_ACT_END   = 456   # 6 players × 7 actions
 
-OBS_SIZE = _MASK_END   # 414
+OBS_SIZE = _LAST_ACT_END   # 456
 
 _STREET_INDEX = {
     BettingRound.PREFLOP: 0,
@@ -187,6 +190,11 @@ def encode_observation(state: GameState,
     # ---- Legal action mask ----
     for action in legal_actions:
         obs[_MASK_START + action.type.value] = 1.0
+
+    # ---- Last action per player (one-hot, persists across streets within a hand) ----
+    for pid, action_val in state.last_actions.items():
+        if 0 <= action_val < NUM_ACTIONS:
+            obs[_LAST_ACT_START + pid * NUM_ACTIONS + action_val] = 1.0
 
     return obs
 

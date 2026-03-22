@@ -97,6 +97,7 @@ class GameSnapshot:
     players_acted:         frozenset          # frozenset[int]
     terminal:              bool
     winners:               Tuple[int, ...]
+    last_actions:          Tuple[Tuple[int, int], ...]  # ((player_id, action_val), ...)
 
     # Per-player state (ordered by seat index)
     player_snapshots:      Tuple[PlayerSnapshot, ...]
@@ -134,6 +135,7 @@ def take_snapshot(game) -> GameSnapshot:
         players_acted        = frozenset(s.players_acted),
         terminal             = s.terminal,
         winners              = tuple(s.winners),
+        last_actions         = tuple(sorted(s.last_actions.items())),
         player_snapshots     = tuple(PlayerSnapshot.from_player(p) for p in game.players),
         remaining_deck       = tuple(game.deck.cards),
         starting_stack       = game.starting_stack,
@@ -161,6 +163,7 @@ def restore_snapshot(snap: GameSnapshot) -> "PokerGame":
     game.raise_limit    = snap.raise_limit
     game.dealer_index   = snap.dealer_index
     game.seed           = None
+    game.training_mode  = False
 
     # Reconstruct players
     game.players = [ps.to_player() for ps in snap.player_snapshots]
@@ -186,6 +189,7 @@ def restore_snapshot(snap: GameSnapshot) -> "PokerGame":
         players_acted        = set(snap.players_acted),
         terminal             = snap.terminal,
         winners              = list(snap.winners),
+        last_actions         = dict(snap.last_actions),
     )
 
     return game

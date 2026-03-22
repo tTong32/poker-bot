@@ -66,8 +66,9 @@ class GameSession:
         seed: int | None = None,
         on_state_change: Optional[Callable[[GameState], None]] = None,
         on_hand_end: Optional[Callable[[HandResult], None]] = None,
+        training_mode: bool = False,
     ):
-        self.game = PokerGame(starting_stack=starting_stack, seed=seed)
+        self.game = PokerGame(starting_stack=starting_stack, seed=seed, training_mode=training_mode)
         self.bots: Dict[int, Bot] = {}          # player_id -> Bot
         self.human_seats: set = set()           # player ids that are human
         self.hand_results: List[HandResult] = []

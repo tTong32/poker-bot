@@ -21,7 +21,7 @@ Usage:
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Set
 from poker_engine.action import Action, ActionType
 from poker_engine.bots import Bot
 from poker_engine.observation import encode_observation
@@ -67,9 +67,14 @@ class TrainingBot(Bot):
         # Per-hand state
         self.starting_stack = starting_stack
         self.hand_experiences: List[Experience] = []
+        self.restricted_actions: Set[ActionType] = set()
 
 
     def choose_action(self, state: GameState, legal_actions: List[Action]) -> Action:
+        if self.restricted_actions:
+            filtered = [a for a in legal_actions if a.type not in self.restricted_actions]
+            if filtered:
+                legal_actions = filtered
         """
         Encode the current state, pass through the network, sample an action,
         record the experience, and return the chosen action.

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 from .player import Player
 from .card import Card
 
@@ -26,6 +26,7 @@ class GameState:
     players_acted: set = field(default_factory=set)  # ids who have acted this street
     terminal: bool = False
     winners: List[int] = field(default_factory=list)  # player ids
+    last_actions: Dict[int, int] = field(default_factory=dict)  # player_id -> ActionType.value, reset each hand
 
     @property
     def current_player(self) -> Player:

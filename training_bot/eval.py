@@ -125,7 +125,7 @@ def _run_vs_opponent(
             starting_stack = STARTING_STACK,
             big_blind    = BIG_BLIND,
         )
-        session = GameSession(starting_stack=STARTING_STACK)
+        session = GameSession(starting_stack=STARTING_STACK, training_mode=True)
         session.assign_bot(0, rl_bot)
         for seat in range(1, NUM_PLAYERS):
             session.assign_bot(seat, opponent_cls(seat))
