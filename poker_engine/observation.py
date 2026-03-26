@@ -97,8 +97,10 @@ _MASK_START    = 407
 _MASK_END      = 414
 _LAST_ACT_START = 414
 _LAST_ACT_END   = 456   # 6 players × 7 actions
+_STRENGTH_START = 456
+_STRENGTH_END   = 458
 
-OBS_SIZE = _LAST_ACT_END   # 456
+OBS_SIZE = _STRENGTH_END   # 456
 
 _STREET_INDEX = {
     BettingRound.PREFLOP: 0,
@@ -195,6 +197,27 @@ def encode_observation(state: GameState,
     for pid, action_val in state.last_actions.items():
         if 0 <= action_val < NUM_ACTIONS:
             obs[_LAST_ACT_START + pid * NUM_ACTIONS + action_val] = 1.0
+
+    if me.hand:
+        ranks  = sorted([c.rank for c in me.hand], reverse=True)
+        suits  = [c.suit for c in me.hand]
+        suited = suits[0] == suits[1]
+        paired = ranks[0] == ranks[1]
+        hi, lo = ranks[0], ranks[1]
+
+        if paired:
+            preflop_str = 0.5 + (hi - 2) / 24.0
+        else:
+            preflop_str = (hi - 2) / 24.0 * 0.6 + (lo - 2) / 24.0 * 0.3
+            if suited:        preflop_str += 0.05
+            if hi - lo <= 1:  preflop_str += 0.05
+        obs[_STRENGTH_START] = float(min(preflop_str, 1.0))
+
+        # Postflop: actual evaluated hand rank / 8, 0–1
+        if len(state.board) >= 3:
+            from .evaluator import evaluate_hand
+            score = evaluate_hand(me.hand, state.board)
+            obs[_STRENGTH_START + 1] = score[0] / 8.0
 
     return obs
 

@@ -28,14 +28,15 @@ class PokerNetwork(nn.Module):
         x = F.relu(self.ln2(self.fc2(x)))
         x = F.relu(self.ln3(self.fc3(x)))
 
-       # Policy head
+        # return policy logits too so callers can apply
+        # action masking before softmax, not after
         policy_logits = self.policy_head(x)
         action_probs = torch.softmax(policy_logits, dim=-1)
 
         # Value head
         value = self.value_head(x)
 
-        return action_probs, value
+        return action_probs, value, policy_logits
 
     def _init_weights(self):
         for module in self.modules():

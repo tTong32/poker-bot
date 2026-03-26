@@ -53,9 +53,9 @@ from .rl_bot import RLBot
 
 # Config
 STARTING_STACK       = 1000.0
-BIG_BLIND            = STARTING_STACK / 100   # 10.0
-ROLLOUT_HANDS        = 2500      # hands collected before each PPO update
-DELTA_HISTORY_SIZE   = 3000      # rolling window for avg chip delta
+BIG_BLIND            = STARTING_STACK/100.0
+ROLLOUT_HANDS        = 5000     # hands collected before each PPO update
+DELTA_HISTORY_SIZE   = 50000    # rolling window for avg chip delta
 CHECKPOINT_INTERVAL  = 50        # PPO updates between checkpoints
 LADDER_EVAL_INTERVAL = 100       # PPO updates between ladder evaluations
 LADDER_EVAL_HANDS    = 1_000     # hands per opponent in the mini eval
@@ -71,15 +71,19 @@ MIN_UPDATES_PER_STAGE = {
     4: None,  # runs indefinitely
 }
 
+#unused now
 REWARD_CLIP_INITIAL  = 2.0
 REWARD_CLIP_MAX      = 10.0
 REWARD_CLIP_STEP     = 1.0
 EV_CLIP_THRESHOLD    = 0.3    # EV must exceed this to widen
 EV_STABLE_UPDATES    = 20     # must hold above threshold for this many updates
 
+#this reward clip is not going to be used for now
+REWARD_CLIP_PER_STAGE = {1: 2.0, 2: 5.0, 3: 8.0, 4: 12.0}
+
 TIGHTBOT_SEED_POOL_SIZE = 10   # stop seeding TightBots once pool reaches this size
 TIGHTBOT_SEED_RATE      = 0.4
-TRAINING_SEATS       = [0]
+TRAINING_SEATS       = [0, 1, 2]
 
 # Red-flag thresholds (warnings printed to console)
 RF_FOLD_RATE      = 0.60
@@ -92,6 +96,9 @@ STAGE1_RESTRICTED = {ActionType.BET_DOUBLE_POT, ActionType.BET_POT, ActionType.A
 STAGE2_RESTRICTED = {ActionType.BET_DOUBLE_POT, ActionType.ALL_IN}
 STAGE3_RESTRICTED = {ActionType.ALL_IN}
 STAGE4_RESTRICTED: set = set()
+
+ENTROPY_START = {1: 0.08, 2: 0.06, 3: 0.05, 4: 0.05}
+ENTROPY_END   = {1: 0.03, 2: 0.02, 3: 0.02, 4: 0.02}
 
 # Terminal colours
 RESET  = "\033[0m"
@@ -170,39 +177,40 @@ def _log_update(update_num, stage, avg, stats, dist):
     if passive_r > RF_PASSIVE_RATE:
         print(f"  {RED}⚠ PASSIVE RATE {passive_r:.1%} > {RF_PASSIVE_RATE:.0%}{RESET}")
 
-
 # Checkpointing
 
-def _save(network, optimizer, update_num, stage, delta_history, path, reward_clip=3.0, ev_stable_count=0, stage_start_update=0):
+def _save(network, trainer, update_num, stage, delta_history, path, reward_clip=3.0, ev_stable_count=0, stage_start_update=0):
     _ensure(os.path.dirname(path))
     avg = sum(delta_history) / len(delta_history) if delta_history else 0.0
     torch.save({
-        "network_state":   network.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-        "update_num":      update_num,
-        "stage":           stage,
-        "delta_history":   list(delta_history),
-        "avg_delta":       avg,
-        "reward_clip":     reward_clip,
-        "ev_stable_count": ev_stable_count,
-        "stage_start_update": stage_start_update,
+        "network_state":        network.state_dict(),
+        "policy_optimizer":     trainer.policy_optimizer.state_dict(),
+        "value_optimizer":      trainer.value_optimizer.state_dict(),
+        "update_num":           update_num,
+        "stage":                stage,
+        "delta_history":        list(delta_history),
+        "avg_delta":            avg,
+        "reward_clip":          reward_clip,
+        "ev_stable_count":      ev_stable_count,
+        "stage_start_update":   stage_start_update,
     }, path)
     _log(f"Checkpoint saved → {path}")
 
 
-def _load(network, optimizer, path):
+def _load(network, trainer, path):
     ck = torch.load(path, weights_only=False)
     network.load_state_dict(ck["network_state"])
-    optimizer.load_state_dict(ck["optimizer_state"])
-    history = deque(ck.get("delta_history", []), maxlen=DELTA_HISTORY_SIZE)
-    reward_clip     = ck.get("reward_clip",     3.0)
-    ev_stable_count = ck.get("ev_stable_count", 0)
+    if "policy_optimizer" in ck:
+        trainer.policy_optimizer.load_state_dict(ck["policy_optimizer"])
+        trainer.value_optimizer.load_state_dict(ck["value_optimizer"])
+    history            = deque(ck.get("delta_history", []), maxlen=DELTA_HISTORY_SIZE)
+    reward_clip        = ck.get("reward_clip", 3.0)
+    ev_stable_count    = ck.get("ev_stable_count", 0)
     stage_start_update = ck.get("stage_start_update", 0)
     _log(
         f"Checkpoint loaded ← {path}  "
         f"(update={ck['update_num']}, stage={ck['stage']}, "
-        f"avg_delta={ck.get('avg_delta', 0.0):+.3f}, "
-        f"reward_clip={reward_clip:.1f})"
+        f"avg_delta={ck.get('avg_delta', 0.0):+.3f})"
     )
     return ck["update_num"], ck["stage"], history, reward_clip, ev_stable_count, stage_start_update
 
@@ -319,6 +327,8 @@ def _startup(run_name: Optional[str]) -> tuple:
 
 # Opponent factories
 
+_SEED_BOTS = [RandomBot, CallBot, TightBot, PositionBot]
+
 def _make_opponent(stage: int, seat: int,
                    pool: SelfPlayPool, current_net: PokerNetwork):
     #if stage == 1:
@@ -328,8 +338,7 @@ def _make_opponent(stage: int, seat: int,
     # Stage 3 — self-play pool
 
     if len(pool) < TIGHTBOT_SEED_POOL_SIZE and random.random() < TIGHTBOT_SEED_RATE:
-        return TightBot(seat)
-
+            return random.choice(_SEED_BOTS)(seat)
 
     net = pool.sample_opponent_network(current_net)
     tag = "Cur" if net is current_net else "Old"
@@ -357,20 +366,16 @@ def _setup_session(
             session.assign_bot(seat, _make_opponent(stage, seat, pool, current_net))
 
     def on_hand_end(result):
-        deltas = []
-        row    = [session_num, result.hand_number, stage]
-
+        row = [session_num, result.hand_number, stage]
         for seat in TRAINING_SEATS:
             before = training_bots[seat].starting_stack
             after  = result.stacks_after.get(seat, before)
             delta  = (after - before) / BIG_BLIND
-            deltas.append(delta)
             row.append(f"{delta:.4f}")
-            # finish_hand uses starting_stack as "before" → call FIRST
             training_bots[seat].finish_hand(result)
             training_bots[seat].starting_stack = after
-
-        delta_history.append(sum(deltas) / len(deltas))
+            if seat == 0:
+                delta_history.append(delta)
         _write_csv(hands_csv, row)
 
     session.on_hand_end = on_hand_end
@@ -389,37 +394,46 @@ _LADDER_OPPONENTS = {
 
 def _mini_eval(network: PokerNetwork) -> Dict[str, float]:
     """
-    Run LADDER_EVAL_HANDS hands against each of the four built-in bot types.
-    Returns {bot_name: avg_delta_bb_per_hand}.
+    Run exactly LADDER_EVAL_HANDS hands against each built-in bot type.
+    Uses multiple sessions if one ends early due to a bust, so the
+    per-hand average is always computed over the correct number of hands.
     """
     results = {}
     for bot_name, bot_cls in _LADDER_OPPONENTS.items():
         total_delta = 0.0
         total_hands = 0
+        hands_left  = LADDER_EVAL_HANDS
         buf         = []
 
-        rl = TrainingBot(
-            player_id     = 0,
-            network       = network,
-            shared_buffer = buf,
-            starting_stack= STARTING_STACK,
-            big_blind     = BIG_BLIND,
-        )
-        session = GameSession(starting_stack=STARTING_STACK, training_mode=True)
-        session.assign_bot(0, rl)
-        for seat in range(1, NUM_PLAYERS):
-            session.assign_bot(seat, bot_cls(seat))
+        while hands_left > 0:
+            # Fresh session and fresh rl bot each time stacks reset to
+            # STARTING_STACK so busts don't carry over between sessions
+            rl = TrainingBot(
+                player_id      = 0,
+                network        = network,
+                shared_buffer  = buf,
+                starting_stack = STARTING_STACK,
+                big_blind      = BIG_BLIND,
+            )
+            session = GameSession(starting_stack=STARTING_STACK, training_mode=True)
+            session.assign_bot(0, rl)
+            for seat in range(1, NUM_PLAYERS):
+                session.assign_bot(seat, bot_cls(seat))
 
-        def _on_hand(res, _rl=rl):
-            nonlocal total_delta
-            after  = res.stacks_after.get(0, _rl.starting_stack)
-            total_delta += (after - _rl.starting_stack) / BIG_BLIND
-            _rl.finish_hand(res)
-            _rl.starting_stack = after
+            def _on_hand(res, _rl=rl):
+                nonlocal total_delta
+                after = res.stacks_after.get(0, _rl.starting_stack)
+                total_delta += (after - _rl.starting_stack) / BIG_BLIND
+                _rl.finish_hand(res)
+                _rl.starting_stack = after
 
-        session.on_hand_end = _on_hand
-        session.run(max_hands=LADDER_EVAL_HANDS)
-        total_hands       = session.hand_number
+            session.on_hand_end = _on_hand
+            session.run(max_hands=hands_left)
+
+            played      = session.hand_number
+            total_hands += played
+            hands_left  -= played
+
         results[bot_name] = total_delta / max(total_hands, 1)
 
     return results
@@ -509,8 +523,11 @@ def train(run_name: Optional[str] = None):
     if resume:
         latest = os.path.join(ck_dir, "latest.pt")
         update_num, stage, delta_history, reward_clip, ev_stable_count, stage_start_update = (
-            _load(network, trainer.optimizer, latest)
+            _load(network, trainer, latest)
         )
+
+    trainer.set_reward_clip(REWARD_CLIP_PER_STAGE[stage])
+    _log(f"Reward clip set to ±{REWARD_CLIP_PER_STAGE[stage]:.1f} BB  (stage {stage})")
 
     _log(
         f"Run '{run_name}'  stage={stage}  "
@@ -565,6 +582,17 @@ def train(run_name: Optional[str] = None):
 
         _log_update(update_num, stage, avg, stats, action_dist)
 
+        # Entropy decay within stage
+        updates_in_stage = update_num - stage_start_update
+        min_updates = MIN_UPDATES_PER_STAGE.get(stage)
+        progress = min(1.0, updates_in_stage / min_updates) if min_updates is not None else 1.0
+        entropy_coeff = ENTROPY_START[stage] + (ENTROPY_END[stage] - ENTROPY_START[stage]) * progress
+        entropy_coeff = max(entropy_coeff, 0.05)
+        trainer.set_entropy_coeff(entropy_coeff)
+        if writer:
+            writer.add_scalar("train/entropy_coeff", entropy_coeff, update_num)
+
+
         # CSV append
         _write_csv(train_csv, [
             _ts(), update_num, stage, f"{avg:.4f}",
@@ -594,27 +622,15 @@ def train(run_name: Optional[str] = None):
             _log(f"{RED}⚠  Explained variance {ev:.3f} < {RF_EXP_VAR} — "
                  f"value head may be under-fitting{RESET}")
 
-        if ev >= EV_CLIP_THRESHOLD:
-            ev_stable_count += 1
-        else:
-            ev_stable_count = 0
-
-        if ev_stable_count >= EV_STABLE_UPDATES and reward_clip < REWARD_CLIP_MAX:
-            reward_clip     += REWARD_CLIP_STEP
-            ev_stable_count  = 0
-            trainer.set_reward_clip(reward_clip)
-            _log(f"{CYAN}reward_clip widened to {reward_clip:.1f} "
-                 f"(EV stable at {ev:.3f} for {EV_STABLE_UPDATES} updates){RESET}")
-            if writer:
-                writer.add_scalar("train/reward_clip", reward_clip, update_num)
+        
 
         # Periodic checkpoint
         if update_num % CHECKPOINT_INTERVAL == 0:
-            _save(network, trainer.optimizer, update_num, stage, delta_history,
+            _save(network, trainer, update_num, stage, delta_history,
                 os.path.join(ck_dir, f"update_{update_num}.pt"),
                 reward_clip=reward_clip, ev_stable_count=ev_stable_count, stage_start_update=stage_start_update)
         # Always refresh latest.pt
-        _save(network, trainer.optimizer, update_num, stage, delta_history,
+        _save(network, trainer, update_num, stage, delta_history,
               os.path.join(ck_dir, "latest.pt"),
               reward_clip=reward_clip, ev_stable_count=ev_stable_count, stage_start_update=stage_start_update)
 
@@ -647,15 +663,17 @@ def train(run_name: Optional[str] = None):
         if min_updates is not None and updates_in_stage >= min_updates:
             next_stage = stage + 1
             stage = next_stage
+            trainer.set_reward_clip(REWARD_CLIP_PER_STAGE[stage])
+            _log(f"Reward clip set to ±{REWARD_CLIP_PER_STAGE[stage]:.1f} BB  (stage {stage})")
             stage_start_update = update_num
             delta_history.clear()
             _update_restricted_actions(training_bots, stage)
             _log(f"{CYAN}Graduated to stage {stage}{RESET}")
             if writer:
                 writer.add_text("graduation", f"Stage {stage} at update {update_num}", update_num)
-            _save(network, trainer.optimizer, update_num, stage, delta_history,
+            _save(network, trainer, update_num, stage, delta_history,
                 os.path.join(ck_dir, f"stage{stage}_start.pt"),
-                reward_clip=reward_clip, ev_stable_count=ev_stable_count)
+                reward_clip=reward_clip, ev_stable_count=ev_stable_count, stage_start_update=stage_start_update)
 
 # Entry Point
 

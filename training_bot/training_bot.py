@@ -87,19 +87,18 @@ class TrainingBot(Bot):
             starting_stack=self.starting_stack,
         )
 
-        # Forward pass through network — get action probabilities
-        obs_tensor = torch.from_numpy(obs).unsqueeze(0)   # (1, 414)
+        # Forward pass 
+        obs_tensor = torch.from_numpy(obs).unsqueeze(0)   # (1, OBS_SIZE)
         with torch.no_grad():
-            action_probs, _ = self.network(obs_tensor)    # (1, 7), (1, 1)
+            _, _, policy_logits = self.network(obs_tensor)  # we only need logits here
 
-        # Build legal action mask and apply it
+        # Build legal action mask and apply it before softmax..
         mask = torch.zeros(len(ActionType))
         for a in legal_actions:
             mask[a.type.value] = 1.0
-        masked_probs = action_probs.squeeze(0) * mask
-        
-        # Renormalize after masking
-        masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
+        logit_mask = (1.0 - mask) * -1e9
+        masked_logits = policy_logits.squeeze(0) + logit_mask
+        masked_probs = torch.softmax(masked_logits, dim=-1)
 
         # Sample action from distribution
         distribution = torch.distributions.Categorical(probs=masked_probs)

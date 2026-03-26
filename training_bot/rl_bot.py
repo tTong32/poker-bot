@@ -74,14 +74,15 @@ class RLBot(Bot):
         obs_tensor = torch.from_numpy(obs).unsqueeze(0)   # (1, OBS_SIZE)
 
         with torch.no_grad():
-            action_probs, _ = self.network(obs_tensor)    # (1, 7)
+            _, _, policy_logits = self.network(obs_tensor)  # (1, 7) raw logits
 
-        # Zero out illegal actions
+        # Mask illegal actions in logit space before softmax
         mask = torch.zeros(len(ActionType))
         for a in legal_actions:
             mask[a.type.value] = 1.0
-        masked_probs = action_probs.squeeze(0) * mask
-        masked_probs = masked_probs / (masked_probs.sum() + 1e-8)
+        logit_mask = (1.0 - mask) * -1e9
+        masked_logits = policy_logits.squeeze(0) + logit_mask
+        masked_probs = torch.softmax(masked_logits, dim=-1)
 
         if self.greedy:
             action_idx = int(masked_probs.argmax().item())

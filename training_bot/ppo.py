@@ -2,186 +2,215 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import List
+from collections import deque
 
 from .training_bot import Experience
 from .network import PokerNetwork
 
-CLIP_EPSILON    = 0.2      # max policy change per update step
-VALUE_COEFF     = 1.0      # how much value loss contributes
-ENTROPY_COEFF   = 0.01     # how much unpredictability is rewarded
-GAMMA           = 0.999    # future reward discount
-LAMBDA          = 0.95     # GAE smoothing factor
-VALUE_PASSES    = 2        # how many times to reuse each rollout for values
-POLICY_PASSES   = 8        # how many times the value head gets passed
-LEARNING_RATE   = 3e-4     # optimizer step size
-REWARD_CLIP     = 3.0      # to maintain value_loss values
-BUST_PENALTY_CLIP = 50.0   # lower bound for bust_penalty (already negative)
+CLIP_EPSILON    = 0.2
+VALUE_COEFF     = 0.5
+ENTROPY_COEFF   = 0.05
+GAMMA           = 0.999
+POLICY_PASSES   = 4
+MINI_BATCH_SIZE = 512       # experiences per gradient step (was: entire buffer at once)
+POLICY_LR       = 3e-4
+VALUE_LR        = 1e-3
+NORM_WINDOW     = 50_000
+
+
+class RunningNormalizer:
+    """Maintains running mean and std of returns for normalization."""
+    def __init__(self, window: int = NORM_WINDOW):
+        self._buf  = deque(maxlen=window)
+        self._mean = 0.0
+        self._std  = 1.0
+
+    def update(self, values: np.ndarray):
+        self._buf.extend(values.tolist())
+        if len(self._buf) > 10:
+            arr        = np.array(self._buf, dtype=np.float32)
+            self._mean = float(arr.mean())
+            self._std  = float(arr.std()) + 1e-8
+
+    def normalize(self, values: np.ndarray) -> np.ndarray:
+        return (values - self._mean) / self._std
+
+    @property
+    def mean(self): return self._mean
+
+    @property
+    def std(self):  return self._std
+
 
 class PPOTrainer:
     def __init__(self, network: PokerNetwork):
-        self.network = network
-        self.optimizer = torch.optim.Adam(
-            network.parameters(),
-            lr=LEARNING_RATE,
+        self.network        = network
+        self._entropy_coeff = ENTROPY_COEFF
+        self._reward_clip   = None   # None = no clipping; set via set_reward_clip()
+
+        backbone_params = (
+            list(network.fc1.parameters()) +
+            list(network.fc2.parameters()) +
+            list(network.fc3.parameters()) +
+            list(network.ln1.parameters()) +
+            list(network.ln2.parameters()) +
+            list(network.ln3.parameters())
+        )
+        self.policy_optimizer = torch.optim.Adam(
+            backbone_params + list(network.policy_head.parameters()),
+            lr=POLICY_LR,
             weight_decay=1e-4,
         )
-        self._reward_clip = REWARD_CLIP
+        self.value_optimizer = torch.optim.Adam(
+            list(network.value_head.parameters()),
+            lr=VALUE_LR,
+            weight_decay=1e-4,
+        )
+        self.normalizer = RunningNormalizer()
+
+    def set_entropy_coeff(self, value: float):
+        self._entropy_coeff = value
 
     def set_reward_clip(self, value: float):
         self._reward_clip = value
 
-    def _compute_advantages(self, experiences: List[Experience]):
-        # Split buffer into per-episode trajectories at every done boundary
-        # Each segment is one player's hand
-        trajectories = []
-        current = []
+    def _compute_mc_returns(self, experiences: List[Experience]) -> tuple:
+        """
+        Pure Monte Carlo returns for each trajectory.
+
+        """
+        trajectories, current = [], []
         for exp in experiences:
             current.append(exp)
             if exp.done:
                 trajectories.append(current)
                 current = []
-        if current:          # any trailing incomplete episode
+        if current:
             trajectories.append(current)
 
-        all_advantages = []
-        all_returns    = []
-
-        for traj in trajectories:
-            clipped = np.clip(
-                [e.reward for e in traj],
-                -self._reward_clip, self._reward_clip,
-            ).astype(np.float32)
-            bust    = np.clip(
-                [e.bust_penalty for e in traj],
-                -BUST_PENALTY_CLIP, 0.0,
-            ).astype(np.float32)
-            rewards = clipped + bust
-            obs     = np.array([e.obs for e in traj])
-
-            with torch.no_grad():
-                _, values = self.network(torch.FloatTensor(obs))
-            values = values.squeeze(-1).numpy()
-
-            advantages = np.zeros(len(traj), dtype=np.float32)
-            last_gae   = 0.0
-
-            for t in reversed(range(len(traj))):
-                # Always bootstrap from the next step WITHIN this trajectory only
-                # The last step is always terminal (done=True), so next_value = 0
-                next_value = values[t + 1] if t + 1 < len(traj) else 0.0
-                delta      = rewards[t] + GAMMA * next_value - values[t]
-                last_gae   = delta + GAMMA * LAMBDA * last_gae
-                advantages[t] = last_gae
-
-            returns = advantages + values
-            all_advantages.append(advantages)
-            all_returns.append(returns)
-
-        advantages = np.concatenate(all_advantages)
-        returns    = np.concatenate(all_returns)
-
-        # Recompute values for all experiences in one batch for EV calculation
-        obs_all = np.array([e.obs for e in experiences])
+        obs_all = torch.FloatTensor(np.array([e.obs for e in experiences]))
         with torch.no_grad():
-            _, v_all = self.network(torch.FloatTensor(obs_all))
-        v_all = v_all.squeeze(-1).numpy()
+            _, values_all, _ = self.network(obs_all)
+        values_all = values_all.squeeze(-1).numpy()
 
-        var_returns = np.var(returns)
-        explained_variance = float(
-            1.0 - np.var(returns - v_all) / var_returns
-        ) if var_returns > 1e-8 else 0.0
+        all_raw_returns = []
+        for traj in trajectories:
+            n               = len(traj)
+            terminal_reward = traj[-1].reward
 
-        # Normalise advantages across all trajectories together
+            # Apply reward clipping on the raw reward before normalization.
+            # This was previously a no-op because set_reward_clip() did nothing.
+            if self._reward_clip is not None:
+                terminal_reward = float(np.clip(terminal_reward,
+                                                -self._reward_clip,
+                                                 self._reward_clip))
+
+            mc_returns = np.array(
+                [GAMMA ** (n - 1 - t) * terminal_reward for t in range(n)],
+                dtype=np.float32,
+            )
+            all_raw_returns.append(mc_returns)
+
+        raw_returns = np.concatenate(all_raw_returns)   # shape (N,)
+
+        self.normalizer.update(raw_returns)
+        norm_returns = self.normalizer.normalize(raw_returns)
+        norm_values  = self.normalizer.normalize(values_all)
+
+        advantages = norm_returns - norm_values
+
+        var_ret = np.var(norm_returns)
+        ev = (float(1.0 - np.var(norm_returns - norm_values) / var_ret)
+              if var_ret > 1e-8 else 0.0)
+
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        return (    
+        return (
             torch.FloatTensor(advantages),
-            torch.FloatTensor(returns),
-            explained_variance,
+            torch.FloatTensor(norm_returns),
+            ev,
         )
 
-    def _compute_loss(
-        self,
-        experiences: List[Experience],
-        advantages: torch.Tensor,
-        returns: torch.Tensor,
-    ) -> tuple:
-        obs       = torch.FloatTensor(np.array([e.obs      for e in experiences]))
-        actions   = torch.LongTensor ([e.action             for e in experiences])
-        old_probs = torch.FloatTensor([e.log_prob           for e in experiences])
-
-        action_probs, values = self.network(obs)
+    def _compute_loss(self, obs_t, actions_t, old_log_probs_t, advantages_t, norm_returns_t):
+        """
+        Compute PPO loss for one mini-batch.
+        Accepts pre-stacked tensors (indexed slices of the full rollout)
+        so mini-batch selection is O(1) rather than rebuilding numpy arrays.
+        """
+        action_probs, values, _ = self.network(obs_t)
         values = values.squeeze(-1)
 
         dist          = torch.distributions.Categorical(probs=action_probs)
-        new_log_probs = dist.log_prob(actions)
+        new_log_probs = dist.log_prob(actions_t)
         entropy       = dist.entropy().mean()
 
-        ratio          = torch.exp(new_log_probs - old_probs)
-        clipped_ratio  = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON)
-        policy_loss    = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+        ratio       = torch.exp(new_log_probs - old_log_probs_t)
+        clipped     = torch.clamp(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON)
+        policy_loss = -torch.min(ratio * advantages_t, clipped * advantages_t).mean()
 
-        value_loss = nn.MSELoss()(values, returns)
-        loss       = policy_loss + VALUE_COEFF * value_loss - ENTROPY_COEFF * entropy
+        value_loss  = nn.MSELoss()(values, norm_returns_t)
+        loss        = policy_loss + VALUE_COEFF * value_loss - self._entropy_coeff * entropy
 
         return loss, policy_loss.item(), value_loss.item(), entropy.item()
 
     def update(self, experiences: List[Experience]) -> dict:
-        advantages, returns, explained_variance = self._compute_advantages(experiences)
+        advantages, norm_returns, explained_variance = self._compute_mc_returns(experiences)
 
+        # Pre-stack the full buffer once; mini-batch loops just index into tensors.
+        obs_t           = torch.FloatTensor(np.array([e.obs      for e in experiences]))
+        actions_t       = torch.LongTensor ([e.action             for e in experiences])
+        old_log_probs_t = torch.FloatTensor([e.log_prob           for e in experiences])
+
+        n = len(experiences)
         stats = {
-            'policy_loss':       0.0,
-            'value_loss':        0.0,
-            'entropy':           0.0,
-            'explained_variance': explained_variance,   # computed once, before weight updates
+            'policy_loss':        0.0,
+            'value_loss':         0.0,
+            'entropy':            0.0,
+            'explained_variance': explained_variance,
         }
 
-        obs_t = torch.FloatTensor(np.array([e.obs for e in experiences]))
+        total_passes = 0
 
-        # Value-only passes first — get the value head working before policy updates
-        for param in list(self.network.fc1.parameters()) + \
-                    list(self.network.fc2.parameters()) + \
-                    list(self.network.fc3.parameters()) + \
-                    list(self.network.ln1.parameters()) + \
-                    list(self.network.ln2.parameters()) + \
-                    list(self.network.ln3.parameters()) + \
-                    list(self.network.policy_head.parameters()):
-            param.requires_grad = False
-
-        for _ in range(VALUE_PASSES):
-            _, values = self.network(obs_t)
-            values     = values.squeeze(-1)
-            value_loss = nn.MSELoss()(values, returns)
-
-            self.optimizer.zero_grad()
-            value_loss.backward()
-            nn.utils.clip_grad_norm_(
-                self.network.value_head.parameters(), max_norm=2.0
-            )
-            self.optimizer.step()
-            stats['value_loss'] += value_loss.item()
-
-        # Unfreeze backbone for policy passes
-        for param in self.network.parameters():
-            param.requires_grad = True
-
-        stats['value_loss'] /= VALUE_PASSES
-
-        # Policy passes after value head has warmed up
         for _ in range(POLICY_PASSES):
-            loss, policy_loss, value_loss, entropy = self._compute_loss(
-                experiences, advantages, returns
-            )
+            perm = torch.randperm(n)
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
-            self.optimizer.step()
+            pass_pl = pass_vl = pass_ent = 0.0
+            num_batches = 0
 
-            stats['policy_loss'] += policy_loss
-            stats['entropy']     += entropy
+            for start in range(0, n, MINI_BATCH_SIZE):
+                idx = perm[start : start + MINI_BATCH_SIZE]
+                if len(idx) < 4:
+                    continue  # skip degenerate tail batches
 
-        stats['policy_loss'] /= POLICY_PASSES
-        stats['entropy']     /= POLICY_PASSES
+                loss, pl, vl, ent = self._compute_loss(
+                    obs_t[idx],
+                    actions_t[idx],
+                    old_log_probs_t[idx],
+                    advantages[idx],
+                    norm_returns[idx],
+                )
+
+                self.policy_optimizer.zero_grad()
+                self.value_optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
+                self.policy_optimizer.step()
+                self.value_optimizer.step()
+
+                pass_pl  += pl
+                pass_vl  += vl
+                pass_ent += ent
+                num_batches += 1
+
+            if num_batches > 0:
+                stats['policy_loss'] += pass_pl  / num_batches
+                stats['value_loss']  += pass_vl  / num_batches
+                stats['entropy']     += pass_ent / num_batches
+                total_passes += 1
+
+        if total_passes > 0:
+            stats['policy_loss'] /= total_passes
+            stats['value_loss']  /= total_passes
+            stats['entropy']     /= total_passes
 
         return stats

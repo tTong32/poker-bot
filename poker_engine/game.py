@@ -19,7 +19,7 @@ from .side_pots import calculate_side_pots
 
 
 NUM_PLAYERS = 6
-ALL_IN_FRACTION = 0.35
+ALL_IN_FRACTION = 1.0
 
 
 class PokerGame:
@@ -150,7 +150,7 @@ class PokerGame:
                 if double and double.amount != (full.amount if full else -1):
                     actions.append(double)
 
-        # ALL_IN: fractional in training to extend session life, true all-in in play
+        # ALL_IN: fractional in training to extend session life, true all-in in play (not true for now since all in fraction=1)
         if player.stack > 0:
             all_in_amount = (
                 min(player.stack, self.starting_stack * ALL_IN_FRACTION)
