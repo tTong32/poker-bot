@@ -1,3 +1,5 @@
+"""Deck of 52 ``Card`` instances with deterministic shuffle via optional RNG seed."""
+
 import random
 from .card import Card
 

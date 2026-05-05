@@ -1,10 +1,13 @@
 """
-cli.py — Terminal interface for playing Texas Hold'em against bots.
+cli.py — Terminal UI for humans vs bots at one table.
 
-Run with:
+Run::
+
     python -m poker_engine.cli
 
-Or import and call run_cli() to start a session.
+PyTorch / ``training_bot`` is imported lazily so scripted bots work without
+Torch installed; RLBot requires a checkpoint path (typically
+``runs/checkpoints/<run>/latest.pt``).
 """
 
 import os
@@ -219,7 +222,7 @@ if _RL_AVAILABLE:
 
 
 def _prompt_rl_factory(stack: float):
-    """Ask for a checkpoint path and return an RLBot factory."""
+    """Prompt for ``runs/checkpoints/...`` path and return ``(label, factory)``."""
     print(f"\n  {BOLD}RLBot checkpoint path{RESET}")
     print(f"  (e.g. runs/checkpoints/my_run/latest.pt): ", end="", flush=True)
     path = input().strip()

@@ -49,15 +49,20 @@ class SessionResult:
 
 class GameSession:
     """
-    Runs a full session of Texas Hold'em.
+    Orchestrates multi-hand poker: bot assignment, dealer rotation, hooks.
 
-    Usage:
+    Typical CLI pattern::
+
         session = GameSession(starting_stack=1000)
         session.assign_bot(0, TightBot(0))
         session.assign_bot(1, PositionBot(1))
-        # seat 2 is a human player — GameSession will call human_input_fn
         session.set_human_seat(2)
+        session.human_input_fn = ...
         result = session.run(max_hands=100)
+
+    Pass ``training_mode=True`` when constructing sessions for ``train.py`` so the
+    nested ``PokerGame`` applies training-specific sizing rules (see
+    ``PokerGame.training_mode``).
     """
 
     def __init__(

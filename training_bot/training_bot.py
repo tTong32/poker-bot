@@ -1,6 +1,9 @@
 """
-training_bot.py — A bot with a pluggable neural network policy for RL training.
+``TrainingBot`` — policy-gradient bot that records ``Experience`` tuples for PPO.
 
+Each seat holds its own ``TrainingBot`` instance, but ``train.py`` typically points
+every seat at the same ``PokerNetwork`` and ``shared_buffer``. Callers must hook
+``finish_hand`` after each hand (see ``GameSession.on_hand_end``).
 """
 
 import numpy as np
@@ -26,13 +29,15 @@ class Experience:
 
 class TrainingBot(Bot):
     """
-    A bot whose decisions are driven by a shared neural network.
+    Neural policy bot used during PPO rollouts.
 
-    Six instances share one network.  Each sees only its own perspective
-    and feeds experiences into a single buffer that PPO trains on.
+    Instances share ``network`` and ``shared_buffer`` across seats (see
+    ``TRAINING_SEATS`` in ``train.py``). Each ``choose_action`` logs one
+    partial ``Experience``; ``finish_hand`` attaches terminal rewards and
+    flushes the hand span into ``shared_buffer``.
 
-    Caller must invoke finish_hand() after each hand ends — wired via
-    session.on_hand_end in train.py.
+    ``restricted_actions`` masks high-variance ``ActionType`` values during
+    early curriculum stages (mutated by ``train._update_restricted_actions``).
     """
 
     def __init__(

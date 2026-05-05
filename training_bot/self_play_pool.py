@@ -1,25 +1,23 @@
 """
-self_play_pool.py — Manages a rolling pool of historical network snapshots
-for stage-3 self-play training.
+Rolling disk-backed pool of frozen ``PokerNetwork`` weights.
 
-Snapshot schedule: every SNAPSHOT_INTERVAL PPO updates.
-Pool cap:         MAX_POOL_SIZE snapshots; oldest is evicted when full.
+``train.py`` writes a snapshot every ``SNAPSHOT_INTERVAL`` PPO updates under
+``runs/snapshots/<run>/`` (path passed as ``snapshot_dir``).
 
-Opponent sampling ratios per session:
-  50%  current network  (most up-to-date weights — teaches against latest strategy)
-  30%  recent snapshots (newest third of pool — recent counter-play)
-  20%  older snapshots  (oldest two-thirds   — prevents forgetting early strategies)
+When opponent seats call ``sample_opponent_network``:
 
-Usage
------
-    pool = SelfPlayPool(snapshot_dir="training_runs/myrun/snapshots")
+  * 50% — train on the live ``current_network`` (shared weights, no extra load)
+  * 30% — sample from the newest third of the pool
+  * 20% — sample from older snapshots (staleness / forgetting hedge)
 
-    # After every SNAPSHOT_INTERVAL PPO updates:
+Oldest files are deleted once the pool exceeds ``MAX_POOL_SIZE``. The directory
+is rescanned on startup so resumes rebuild the in-memory index.
+
+Usage::
+
+    pool = SelfPlayPool(snapshot_dir="runs/snapshots/my_run")
     pool.save_snapshot(network, update_num)
-
-    # When building a stage-3 session opponent:
     opponent_net = pool.sample_opponent_network(current_network)
-    bot = RLBot(seat, opponent_net, starting_stack=1000.0)
 """
 
 import os

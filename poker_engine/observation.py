@@ -1,21 +1,10 @@
 """
-observation.py — Numeric observation encoder for RL/CFR agents.
+Observation encoder for RL / search agents.
 
-Converts a GameState into a fixed-size float32 numpy array from the
-perspective of a single player (the observing player only sees their
-own hole cards, not opponents').
-
-Design decisions:
-  Cards:         One-hot, 52 bits per card.  Sparse but lets the network
-                 learn rank×suit interactions without inductive bias.
-  Hole cards:    2 × 52 = 104 bits, sorted for order-invariance.
-  Board cards:   5 × 52 = 260 bits, zero-padded for unseen streets.
-  Pot / scalars: Normalised by starting_stack for stable scale.
-  Position:      One-hot over 6 seats relative to dealer.
-  Street:        One-hot over 4 streets.
-  Action mask:   7-bit mask, one per ActionType.
-  Hand strength: Preflop heuristic + postflop rank/8, injected as domain
-                 knowledge to speed up early hand-selection learning.
+``encode_observation`` maps ``GameState`` + legal actions (from one player's view)
+to a dense ``float32`` vector of length ``OBS_SIZE`` (458): card one-hots,
+normalized stacks and bets, masks, recent action history, and a coarse strength
+feature. Layout constants live at module scope.
 """
 
 import numpy as np

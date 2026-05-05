@@ -1,3 +1,5 @@
+"""Legal poker moves materialised as dataclass rows."""
+
 from enum import Enum
 from dataclasses import dataclass
 

@@ -1,8 +1,12 @@
 """
-simulate.py — Headless simulation of bots playing against each other.
+simulate.py — Interactive wizard for headless bot-vs-bot sessions.
 
-Run with:
+Run::
+
     python -m poker_engine.simulate
+
+Assign scripted bots or RLBot per seat (checkpoint paths usually live under
+``runs/checkpoints/<run>/``).
 """
 
 import os
@@ -104,7 +108,7 @@ if _RL_AVAILABLE:
     BOT_TYPES["5"] = ("RLBot", None)   # factory resolved after checkpoint prompt
 
 def _prompt_rl_factory(stack: float, seat: int) -> tuple:
-    """Ask for a checkpoint path, return (display_name, factory) for this seat."""
+    """Prompt for a checkpoint path; return ``(display_name, seat_factory)``."""
     print(f"\n  {BOLD}RLBot checkpoint for seat {seat}:{RESET}")
     print(f"  Path (e.g. runs/checkpoints/my_run/latest.pt): ", end="", flush=True)
     path = input().strip()

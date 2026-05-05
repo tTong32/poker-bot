@@ -1,23 +1,33 @@
 """
-train.py — Training environment for the poker RL bot.
+train.py — Main training loop for the poker RL bot (shared-policy PPO).
 
-Run with:
+Run::
+
     python -m training_bot.train
     python -m training_bot.train --name my_experiment
 
-Directory layout
-----------------------------
-    runs/checkpoints/<run_name>/  latest.pt, update_N.pt, stageN_start.pt
-    runs/snapshots/<run_name>/    snapshot_N.pt  (self-play pool)
-    runs/logs/<run_name>/         training_log.csv, hands_log.csv, eval_log.csv
-    runs/tensorboard/<run_name>/  TensorBoard event files
+Artifacts (per logical run name)::
 
-Curriculum stages
------------------
-    1 — Action-restricted (no large bets/all-in)  → ladder: RandomBot > 2 BB/hand
-    2 — Moderate restriction (no all-in)           → ladder: CallBot > 0.5, TightBot > -0.5
-    3 — Light restriction (no all-in)              → ladder: TightBot > 0.3, PositionBot > -0.5
-    4 — Unrestricted self-play                     → runs indefinitely
+    runs/checkpoints/<run>/   latest.pt, update_<N>.pt, stage<N>_start.pt
+    runs/snapshots/<run>/    snapshot_<N>.pt (rolling pool, capped by MAX_POOL_SIZE)
+    runs/logs/<run>/         training_log.csv, hands_log.csv, eval_log.csv
+    runs/tensorboard/<run>/   TensorBoard event files
+
+Curriculum — four stages (see ``STAGE*_RESTRICTED``, ``REWARD_CLIP_PER_STAGE``,
+``ENTROPY_START`` / ``ENTROPY_END``):
+
+    1. No pot bet, double-pot, or all-in; tighter reward clip.
+    2. No double-pot or all-in.
+    3. No all-in.
+    4. Full action set; runs indefinitely.
+
+Promotion calls ``_check_graduation``: minimum updates in-stage
+(``MIN_UPDATES_PER_STAGE``), ladder-eval data present, and any non-empty
+``STAGE_GRAD_THRESHOLDS[stage]`` conditions satisfied.
+
+Default ``TRAINING_SEATS`` fills every seat with ``TrainingBot`` sharing one
+``PokerNetwork`` (six-player self-play). ``_make_opponent`` / ``SelfPlayPool``
+apply only to seats *not* in ``TRAINING_SEATS``.
 """
 
 import os
@@ -99,7 +109,7 @@ GREEN  = "\033[92m"
 RED    = "\033[91m"
 
 
-# Logging helpers (unchanged)
+# Logging helpers
 
 def _ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
@@ -226,7 +236,7 @@ def _read_meta(path: str) -> dict:
         return {}
 
 
-# Interactive startup prompt (unchanged from previous version)
+# Interactive startup — lists runs under runs/checkpoints/
 
 def _startup(run_name: Optional[str]) -> tuple:
     ck_root = "runs/checkpoints"
@@ -312,12 +322,16 @@ _SEED_BOTS = [RandomBot, CallBot, TightBot, PositionBot]
 
 def _make_opponent(stage: int, seat: int, pool: SelfPlayPool, current_net: PokerNetwork):
     """
-    Build an opponent for one training session seat.
+    Build an opponent RLBot for a non-training seat.
 
-    While the pool is small (< TIGHTBOT_SEED_POOL_SIZE), mix in seed bots at
-    TIGHTBOT_SEED_RATE to prevent pure-noise early self-play.  Once the pool
-    is mature, the 50/30/20 sampling inside pool.sample_opponent_network()
-    provides appropriate diversity.
+    While the pool is small (< ``TIGHTBOT_SEED_POOL_SIZE``), mix in scripted
+    seed bots at ``TIGHTBOT_SEED_RATE``. Otherwise ``SelfPlayPool`` mixes the
+    current network with frozen snapshots (50/30/20 split).
+
+    The ``stage`` argument is unused today but kept for call-site stability /
+    future curriculum-aware mixing.
+
+    Inactive when all seats are in ``TRAINING_SEATS`` (the default).
     """
     if len(pool) < TIGHTBOT_SEED_POOL_SIZE and random.random() < TIGHTBOT_SEED_RATE:
         return random.choice(_SEED_BOTS)(seat)

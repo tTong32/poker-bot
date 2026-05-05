@@ -1,3 +1,5 @@
+"""Player stacks, bets, and eligibility flags used by ``PokerGame``."""
+
 from dataclasses import dataclass, field
 from typing import List
 from .card import Card

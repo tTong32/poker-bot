@@ -1,25 +1,20 @@
 """
-rl_bot.py — Inference-only bot backed by a trained PokerNetwork.
+Inference-only ``Bot`` that runs a ``PokerNetwork`` without training side-effects.
 
-Used for:
-  - Playing trained bots in CLI / simulation mode
-  - Frozen opponents in the self-play pool (stage 3)
-  - Standalone evaluation
+Used from the CLI/simulation wizards, ladder evaluation, and frozen opponents
+loaded from ``SelfPlayPool`` checkpoints.
 
-Does NOT collect experiences, does NOT write to any buffer, does NOT
-perform gradient updates — it simply maps observations → actions using
-a frozen network copy.
+Does not append ``Experience`` rows or run backward passes — only masked softmax
+(or greedy argmax) over legal actions.
 
-Usage
------
-    # From a checkpoint file:
-    bot = RLBot.from_checkpoint(player_id=0, path="checkpoints/myrun/latest.pt")
+Usage::
 
-    # From an already-loaded network:
+    bot = RLBot.from_checkpoint(
+        player_id=0,
+        checkpoint_path="runs/checkpoints/my_run/latest.pt",
+    )
     bot = RLBot(player_id=0, network=net, starting_stack=1000.0)
-
-    # Greedy (argmax) vs stochastic (sample):
-    bot = RLBot(player_id=0, network=net, greedy=True)
+    bot = RLBot(player_id=0, network=net, greedy=True)   # argmax vs sample
 """
 
 import os
@@ -113,8 +108,9 @@ class RLBot(Bot):
         greedy: bool = False,
     ) -> "RLBot":
         """
-        Load a network from a training checkpoint and return a ready-to-play bot.
-        Checkpoints are the .pt files saved by train.py (they contain 'network_state').
+        Load ``network_state`` from a ``train.py`` checkpoint (``runs/checkpoints/.../*.pt``).
+
+        Raises ``FileNotFoundError`` if the path does not exist.
         """
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")

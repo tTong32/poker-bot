@@ -1,18 +1,19 @@
 """
 ppo.py — PPO trainer with Generalized Advantage Estimation (GAE).
 
-Hyperparameter summary
-----------------------
-  GAMMA            0.999  discount factor
-  LAMBDA           0.95   GAE smoothing (0 = pure TD, 1 = pure MC)
-  CLIP_EPSILON     0.2    PPO surrogate clip range
-  VALUE_COEFF      0.5    value loss weight in joint loss
-  ENTROPY_COEFF    0.05   starting entropy bonus (decayed by train.py)
-  POLICY_PASSES    4      joint policy+value passes per rollout
-  VALUE_EXTRA_PASSES 4    additional value-only passes per rollout
-  MINI_BATCH_SIZE  512    experiences per gradient step
-  POLICY_LR        3e-4   backbone + policy head LR
-  VALUE_LR         1e-3   value head LR (also extra-pass backbone LR)
+Hyperparameters are the module-level constants below; this summary mirrors them:
+
+  CLIP_EPSILON        Surrogate ratio clip (±)
+  VALUE_COEFF         MSE value-loss weight in the joint objective
+  ENTROPY_COEFF       Initial entropy bonus; ``train.py`` overrides via
+                      ``set_entropy_coeff`` (floored at ``ENTROPY_FLOOR``)
+  GAMMA               MDP discount
+  LAMBDA              GAE λ (bias/variance trade-off)
+  POLICY_PASSES       Joint policy+value optimizer passes per rollout
+  VALUE_EXTRA_PASSES  Extra value-only passes (separate value optimizer)
+  MINI_BATCH_SIZE     Samples per gradient step within each pass
+  POLICY_LR / VALUE_LR  Adam learning rates (grouped in ``optimizer`` / ``value_optimizer``)
+  NORM_WINDOW         Sliding window for ``RunningNormalizer`` over returns
 """
 
 import torch
@@ -40,7 +41,7 @@ NORM_WINDOW       = 50_000
 ENTROPY_FLOOR     = 0.01        # absolute minimum entropy coefficient
 
 
-# Running return normalizer (unchanged)
+# Running return normalizer over recent hand returns
 
 class RunningNormalizer:
     """Maintains a running mean/std over a sliding window of return values."""
@@ -78,6 +79,11 @@ class RunningNormalizer:
 # PPO Trainer
 
 class PPOTrainer:
+    """
+    Multi-pass PPO + GAE with joint policy/value updates plus extra value-only passes.
+
+    ``train.py`` calls ``set_reward_clip`` / ``set_entropy_coeff`` between batches.
+    """
 
     def __init__(self, network: PokerNetwork):
         self.network        = network

@@ -23,6 +23,15 @@ ALL_IN_FRACTION = 1.0
 
 
 class PokerGame:
+    """
+    Mutable NLHE engine for ``NUM_PLAYERS`` seats.
+
+    Public surface: ``start_new_hand``, ``get_legal_actions``, ``apply_action``.
+    Blinds follow ``starting_stack / 100`` (SB half of BB).
+
+    ``training_mode`` tweaks chip semantics where noted (e.g. all-in sizing via
+    ``ALL_IN_FRACTION``) so rollouts stay usable while learning.
+    """
 
     def __init__(self, starting_stack: float = 1000.0, seed: int | None = None, training_mode: bool = False):
         self.starting_stack = starting_stack

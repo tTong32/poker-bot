@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Card:
+    """One card: ``rank`` 2–14 (ace = 14) and ``suit`` 0–3."""
+
     rank: int  # 2–14 (14 = Ace)
     suit: int  # 0=♦, 1=♣, 2=♥, 3=♠
 

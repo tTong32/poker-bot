@@ -1,10 +1,15 @@
+"""Shared actor–critic MLP: ``OBS_SIZE``-dim poker observations → policy + value."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from poker_engine.observation import OBS_SIZE
 
+
 class PokerNetwork(nn.Module):
+    """LayerNorm MLP with seven-way policy logits and scalar ``V(s)``."""
+
     def __init__(self):
         super().__init__()
 

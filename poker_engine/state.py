@@ -1,3 +1,5 @@
+"""``BettingRound`` labels and mutable ``GameState`` carried by ``PokerGame``."""
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from .player import Player
