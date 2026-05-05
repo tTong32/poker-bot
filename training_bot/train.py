@@ -50,15 +50,15 @@ LADDER_EVAL_INTERVAL  = 100
 LADDER_EVAL_HANDS     = 1_000
 
 # Minimum PPO updates before a stage can graduate (prevents premature promotion)
-MIN_UPDATES_PER_STAGE = {1: 100, 2: 100, 3: 150, 4: None}
+MIN_UPDATES_PER_STAGE = {1: 125, 2: 175, 3: 225, 4: None}
 
 # Performance thresholds checked at each ladder evaluation.
 # ALL listed conditions must be met simultaneously.
 # Keys match the _LADDER_OPPONENTS dict in _mini_eval().
 STAGE_GRAD_THRESHOLDS = {
-    1: {"RandomBot":   2.0},                                   # comfortably beat random
-    2: {"CallBot":     0.5, "TightBot":    -0.5},              # positive vs call, not crushed by tight
-    3: {"TightBot":    0.3, "PositionBot": -0.5},              # slightly positive vs tight
+    1: {},#{"RandomBot":   2.0},                                   # comfortably beat random
+    2: {},#{"CallBot":     0.5, "TightBot":    -0.5},              # positive vs call, not crushed by tight
+    3: {},#{"TightBot":    0.3, "PositionBot": -0.5},              # slightly positive vs tight
     4: None,                                                   # indefinite
 }
 
@@ -79,7 +79,7 @@ ENTROPY_END   = {1: 0.03, 2: 0.02, 3: 0.015, 4: 0.01}
 # Self-play pool seeding parameters
 TIGHTBOT_SEED_POOL_SIZE = 10
 TIGHTBOT_SEED_RATE      = 0.4
-TRAINING_SEATS          = [0]
+TRAINING_SEATS          = [0, 1, 2, 3, 4, 5]
 
 # Red-flag warning thresholds (console warnings only)
 RF_FOLD_RATE      = 0.60

@@ -26,7 +26,7 @@ from .network import PokerNetwork
 
 # Hyperparameters
 
-CLIP_EPSILON      = 0.2
+CLIP_EPSILON      = 0.1
 VALUE_COEFF       = 0.5
 ENTROPY_COEFF     = 0.05
 GAMMA             = 0.999
@@ -34,7 +34,7 @@ LAMBDA            = 0.7        # GAE smoothing factor
 POLICY_PASSES     = 4
 VALUE_EXTRA_PASSES= 4           # value-only passes on top of joint passes
 MINI_BATCH_SIZE   = 512
-POLICY_LR         = 3e-4
+POLICY_LR         = 5e-5
 VALUE_LR          = 1e-3
 NORM_WINDOW       = 50_000
 ENTROPY_FLOOR     = 0.01        # absolute minimum entropy coefficient
@@ -106,7 +106,7 @@ class PPOTrainer:
         # Trains backbone + value head at VALUE_LR so the backbone learns
         # value-useful representations on top of the joint passes.
         self.value_optimizer = torch.optim.Adam(
-            backbone_params + list(network.value_head.parameters()),
+            list(network.value_head.parameters()),
             lr=VALUE_LR, weight_decay=1e-4,
         )
 
